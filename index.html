@@ -106,12 +106,13 @@
       <p class="disclaimer">
         Note: Browser-based speed tests can be limited by your device's Wi-Fi card or browser overhead.
         For the most accurate results, use a hardwired ethernet connection.
+        Upload uses a smaller payload than download so hosted apps (for example Render) stay under common request-size limits.
       </p>
     </section>
   </main>
   <script>
     const DEFAULT_PAYLOAD_BYTES = 134217728;
-    const UPLOAD_PAYLOAD_BYTES = DEFAULT_PAYLOAD_BYTES;
+    const UPLOAD_PAYLOAD_BYTES = 32 * 1024 * 1024;
     const DEFAULT_ENDPOINT = window.location.origin + "/payload.bin";
     const UPLOAD_ENDPOINT = window.location.origin + "/upload.bin";
     const UPLOAD_CHUNK = 256 * 1024;
@@ -337,6 +338,8 @@
           activeUploadXhr = xhr;
           const start = performance.now();
 
+          xhr.timeout = 900000;
+
           xhr.upload.addEventListener("progress", (e) => {
             if (!e.lengthComputable || !e.total) return;
             const elapsedSec = (performance.now() - start) / 1000;
@@ -350,17 +353,27 @@
             setUploadProgress(percent);
           });
 
+          function finishFailure(label) {
+            activeUploadXhr = null;
+            const snippet = (xhr.responseText || "").trim().slice(0, 120);
+            const detail =
+              xhr.status > 0
+                ? "HTTP " + xhr.status + (snippet ? ": " + snippet : "")
+                : label + (snippet ? " " + snippet : "");
+            reject(new Error(detail));
+          }
+
           xhr.addEventListener("load", () => {
             activeUploadXhr = null;
             const end = performance.now();
             const seconds = (end - start) / 1000;
             if (xhr.status < 200 || xhr.status >= 300) {
-              reject(new Error("HTTP " + xhr.status));
+              finishFailure("Request failed");
               return;
             }
             let receivedBytes = totalBytes;
             try {
-              const data = xhr.response;
+              const data = JSON.parse(xhr.responseText || "{}");
               if (data && typeof data.bytesReceived === "number") receivedBytes = data.bytesReceived;
             } catch (e2) {
               /* use totalBytes */
@@ -371,8 +384,7 @@
           });
 
           xhr.addEventListener("error", () => {
-            activeUploadXhr = null;
-            reject(new Error("Network error"));
+            finishFailure("Network error (connection reset or blocked)");
           });
 
           xhr.addEventListener("abort", () => {
@@ -380,8 +392,11 @@
             reject(new DOMException("Aborted", "AbortError"));
           });
 
+          xhr.addEventListener("timeout", () => {
+            finishFailure("Upload timed out");
+          });
+
           xhr.open("POST", testUrl);
-          xhr.responseType = "json";
           xhr.setRequestHeader("Content-Type", "application/octet-stream");
           xhr.send(body);
         });
