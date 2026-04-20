@@ -115,7 +115,7 @@
     const UPLOAD_PAYLOAD_BYTES = 32 * 1024 * 1024;
     const DEFAULT_ENDPOINT = window.location.origin + "/payload.bin";
     const UPLOAD_ENDPOINT = window.location.origin + "/upload.bin";
-    const UPLOAD_CHUNK = 256 * 1024;
+    const UPLOAD_CHUNK = 65536;
 
     const ring = document.getElementById("ring");
     const speedValue = document.getElementById("speedValue");
