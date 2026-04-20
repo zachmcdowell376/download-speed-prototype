@@ -1,0 +1,13 @@
+{
+  "name": "download-speed-prototype",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Spectrum-themed download speed test app for Render deployment",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

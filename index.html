@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Spectrum Internet Speed Test</title>
+  <style>
+    :root{--deep:#003087;--light:#0073D1;--bg:#f3f6fb;--txt:#10233f;--muted:#5d6b82;--ok:#0b7a3b;--warn:#b26a00;--bad:#b42318;--track:#dce7f7}
+    *{box-sizing:border-box}
+    body{margin:0;min-height:100vh;font-family:Arial,"Segoe UI",Roboto,sans-serif;background:linear-gradient(140deg,#fff 0%,#eef4ff 45%,#e6f1ff 100%);color:var(--txt);display:grid;place-items:center;padding:24px}
+    .app{width:min(920px,100%);background:#fff;border:1px solid #d8e3f4;border-radius:18px;box-shadow:0 22px 46px rgba(0,48,135,.14);overflow:hidden}
+    .head{padding:20px 28px;background:linear-gradient(120deg,var(--deep),var(--light));color:#fff}
+    .head h1{margin:0;font-size:clamp(1.35rem,2.8vw,2rem)}
+    .head p{margin:8px 0 0;opacity:.92}
+    .content{padding:26px;display:grid;gap:24px}
+    .panel{display:grid;place-items:center;gap:18px;padding:16px;border-radius:14px;background:var(--bg);border:1px solid #dfebfd}
+    .ring{width:280px;height:280px;border-radius:50%;padding:14px;background:conic-gradient(var(--light) 0deg,var(--track) 0deg 360deg);transition:background .2s ease}
+    .ring.pulse{animation:pulse 1.45s ease-in-out infinite}
+    @keyframes pulse{0%{transform:scale(1)}50%{transform:scale(1.02);box-shadow:0 0 26px rgba(0,115,209,.35)}100%{transform:scale(1)}}
+    .inner{width:100%;height:100%;border-radius:50%;background:#fff;display:grid;place-items:center;text-align:center;padding:18px;border:2px solid #dce7f9}
+    .label{font-size:.88rem;color:var(--muted);margin:0}
+    .speed{margin:8px 0 2px;font-weight:800;font-size:clamp(2rem,8vw,3.5rem);line-height:1;color:var(--deep)}
+    .units{margin:0;font-size:.94rem;color:var(--muted);font-weight:600;text-transform:uppercase}
+    .progress{margin:10px 0 0;font-size:.9rem;color:var(--muted);min-height:1.2em}
+    .actions{display:flex;gap:12px;flex-wrap:wrap;justify-content:center}
+    button{border:none;border-radius:999px;font-size:1rem;font-weight:700;padding:12px 24px;cursor:pointer;transition:transform .12s ease,filter .12s ease}
+    button:hover:not(:disabled){transform:translateY(-1px);filter:brightness(1.05)}
+    button:disabled{opacity:.6;cursor:not-allowed}
+    .start{color:#fff;background:linear-gradient(120deg,var(--deep),var(--light));min-width:160px}
+    .cancel{color:var(--deep);background:#e4eefb}
+    .compare{border:1px solid #dfebfd;background:#fbfdff;border-radius:14px;padding:16px;display:grid;gap:12px}
+    .compare h2{margin:0;font-size:1.05rem;color:var(--deep)}
+    select{width:100%;padding:10px 12px;border-radius:10px;border:1px solid #c8d9f3;font-size:.98rem;color:var(--txt);background:#fff}
+    .evaluation{margin:0;min-height:1.2em;font-weight:700}
+    .ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}
+    .status{margin:0;padding:10px 12px;border-radius:10px;background:#f0f5ff;border:1px solid #d6e5fc;color:var(--deep);font-weight:600;min-height:44px}
+    .disclaimer{margin:0;font-size:.89rem;color:var(--muted);line-height:1.45;background:#f8fafc;border:1px solid #e4ebf6;border-radius:10px;padding:12px}
+    .small{font-size:.82rem;color:var(--muted)}
+    @media (max-width:640px){.content{padding:16px}.ring{width:230px;height:230px}}
+  </style>
+</head>
+<body>
+  <main class="app">
+    <header class="head">
+      <h1>Spectrum Internet Download Speed Test</h1>
+      <p>Measure your real-world download speed and compare it against your Spectrum tier.</p>
+    </header>
+    <section class="content">
+      <section class="panel">
+        <div class="ring" id="ring" aria-hidden="true">
+          <div class="inner">
+            <p class="label" id="speedLabel">Current Speed</p>
+            <p class="speed" id="speedValue">0.00</p>
+            <p class="units">mbps</p>
+            <p class="progress" id="progressText">Ready to run test</p>
+          </div>
+        </div>
+        <div class="actions">
+          <button class="start" id="startBtn">Start Test</button>
+          <button class="cancel" id="cancelBtn" disabled>Cancel</button>
+        </div>
+        <p class="status" id="status">Press Start Test to begin.</p>
+      </section>
+      <section class="compare">
+        <h2>Spectrum Tier Comparison</h2>
+        <label for="planSelect">Choose your Spectrum plan:</label>
+        <select id="planSelect" disabled>
+          <option value="">Select plan</option>
+          <option value="300">Spectrum Internet 300 Mbps</option>
+          <option value="500">Spectrum Ultra 500 Mbps</option>
+          <option value="1000">Spectrum Gig 1000 Mbps</option>
+        </select>
+        <p class="evaluation" id="evaluation">Run a test first to enable comparison.</p>
+        <p class="small" id="detail"></p>
+      </section>
+      <p class="disclaimer">
+        Note: Browser-based speed tests can be limited by your device's Wi-Fi card or browser overhead.
+        For the most accurate results, use a hardwired ethernet connection.
+      </p>
+    </section>
+  </main>
+  <script>
+    const DEFAULT_PAYLOAD_BYTES = 1 * 1024 * 1024 * 1024;
+    const DEFAULT_ENDPOINT = window.location.origin + "/payload.bin";
+
+    const ring = document.getElementById("ring");
+    const speedValue = document.getElementById("speedValue");
+    const speedLabel = document.getElementById("speedLabel");
+    const progressText = document.getElementById("progressText");
+    const statusEl = document.getElementById("status");
+    const startBtn = document.getElementById("startBtn");
+    const cancelBtn = document.getElementById("cancelBtn");
+    const planSelect = document.getElementById("planSelect");
+    const evaluation = document.getElementById("evaluation");
+    const detail = document.getElementById("detail");
+
+    let controller = null;
+    let isRunning = false;
+    let finalMbps = null;
+
+    function fmt(n, digits = 2) {
+      return Number.isFinite(n) ? n.toFixed(digits) : "0.00";
+    }
+
+    function setProgress(percent) {
+      const angle = Math.min(360, Math.max(0, percent * 3.6));
+      ring.style.background = "conic-gradient(var(--light) " + angle + "deg, var(--track) " + angle + "deg 360deg)";
+    }
+
+    function setStatus(msg, isError = false) {
+      statusEl.textContent = msg;
+      statusEl.style.color = isError ? "var(--bad)" : "var(--deep)";
+      statusEl.style.background = isError ? "#fff3f2" : "#f0f5ff";
+      statusEl.style.borderColor = isError ? "#f6d1ce" : "#d6e5fc";
+    }
+
+    function setRunning(running) {
+      isRunning = running;
+      startBtn.disabled = running;
+      cancelBtn.disabled = !running;
+      ring.classList.toggle("pulse", running);
+      speedLabel.textContent = running ? "Current Speed" : "Final Result";
+    }
+
+    function resetEvaluation() {
+      evaluation.textContent = "Select your plan to compare.";
+      evaluation.className = "evaluation";
+      detail.textContent = "";
+    }
+
+    function evaluateAgainstPlan() {
+      const plan = Number(planSelect.value);
+      if (!finalMbps || !plan) return;
+      const ratio = finalMbps / plan;
+      const measured = fmt(finalMbps, 2);
+      evaluation.className = "evaluation";
+      if (ratio >= 0.9) {
+        evaluation.classList.add("ok");
+        evaluation.textContent = "Your speed is " + measured + " mbps. This is excellent for your " + plan + " Mbps plan.";
+      } else if (ratio >= 0.7) {
+        evaluation.classList.add("warn");
+        evaluation.textContent = "Your speed is " + measured + " mbps, a bit below your " + plan + " Mbps plan.";
+      } else {
+        evaluation.classList.add("bad");
+        evaluation.textContent = "Your speed is " + measured + " mbps, underperforming for your " + plan + " Mbps plan.";
+      }
+      detail.textContent = "Tip: reboot modem/router, test over ethernet, and retest at a low-traffic time.";
+    }
+
+    async function runDownloadTest() {
+      setRunning(true);
+      finalMbps = null;
+      planSelect.disabled = true;
+      planSelect.value = "";
+      resetEvaluation();
+      progressText.textContent = "Starting download...";
+      speedValue.textContent = "0.00";
+      setProgress(0);
+      setStatus("Running speed test...");
+
+      const cacheBust = Date.now() + "-" + Math.floor(Math.random() * 1e6);
+      const testUrl = DEFAULT_ENDPOINT + "?bytes=" + DEFAULT_PAYLOAD_BYTES + "&cache_bust=" + cacheBust;
+      controller = new AbortController();
+
+      try {
+        const start = performance.now();
+        const response = await fetch(testUrl, {
+          method: "GET",
+          cache: "no-store",
+          signal: controller.signal
+        });
+
+        if (!response.ok || !response.body) {
+          throw new Error("Unable to download test payload.");
+        }
+
+        const contentEncoding = (response.headers.get("content-encoding") || "").toLowerCase();
+        if (contentEncoding && contentEncoding !== "identity") {
+          throw new Error("Compressed payload detected. Disable compression for payload.bin.");
+        }
+
+        const contentLenHeader = Number(response.headers.get("content-length"));
+        const totalBytes = Number.isFinite(contentLenHeader) && contentLenHeader > 0 ? contentLenHeader : DEFAULT_PAYLOAD_BYTES;
+        const reader = response.body.getReader();
+        let received = 0;
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          received += value.byteLength;
+
+          const elapsedSec = (performance.now() - start) / 1000;
+          const megabits = (received * 8) / 1_000_000;
+          const currentMbps = elapsedSec > 0 ? megabits / elapsedSec : 0;
+          const percent = totalBytes > 0 ? (received / totalBytes) * 100 : 0;
+
+          speedValue.textContent = fmt(currentMbps, 2);
+          progressText.textContent = "Downloaded " + (received / 1_048_576).toFixed(2) + " MB of " + (totalBytes / 1_048_576).toFixed(2) + " MB";
+          setProgress(percent);
+        }
+
+        const end = performance.now();
+        const seconds = (end - start) / 1000;
+        const fileMegabits = (received * 8) / 1_000_000;
+        finalMbps = fileMegabits / seconds;
+
+        speedValue.textContent = fmt(finalMbps, 2);
+        progressText.textContent = "Download complete in " + seconds.toFixed(2) + "s";
+        setProgress(100);
+        setStatus("Test complete. Pick your plan to compare.");
+        planSelect.disabled = false;
+      } catch (err) {
+        if (err.name === "AbortError") {
+          setStatus("Test canceled.", true);
+          progressText.textContent = "Canceled";
+        } else {
+          setStatus("Network error occurred. Please check your connection and try again.", true);
+          progressText.textContent = "Failed";
+        }
+        speedValue.textContent = "0.00";
+        setProgress(0);
+      } finally {
+        setRunning(false);
+        controller = null;
+      }
+    }
+
+    startBtn.addEventListener("click", () => {
+      if (!isRunning) runDownloadTest();
+    });
+
+    cancelBtn.addEventListener("click", () => {
+      if (controller) controller.abort();
+    });
+
+    planSelect.addEventListener("change", evaluateAgainstPlan);
+  </script>
+</body>
+</html>
