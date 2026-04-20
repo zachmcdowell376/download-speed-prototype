@@ -47,6 +47,8 @@
     .cancel-upload{color:var(--purple-deep);background:#ede9fe}
     #uploadRing{background:conic-gradient(var(--purple-light) 0deg,var(--purple-track) 0deg 360deg);transition:background .2s ease}
     .panel-upload .ring.pulse{box-shadow:0 0 20px rgba(124,58,237,.25)}
+    .two-runs-notice{margin:0;font-size:.8rem;color:var(--muted);text-align:center;line-height:1.4;max-width:300px}
+    .panel-upload .two-runs-notice{color:#6b21a8}
     @media (max-width:640px){.content{padding:16px}.ring{width:230px;height:230px}}
   </style>
 </head>
@@ -60,35 +62,37 @@
       <div class="tests-grid">
       <section class="panel">
         <p class="label" style="margin:0 0 4px;font-weight:700;color:var(--deep)">Download</p>
+        <p class="two-runs-notice">This test runs <strong>twice</strong> in a row. The final number is the <strong>average</strong> of both runs. You need to finish both passes before the result is final.</p>
         <div class="ring" id="ring" aria-hidden="true">
           <div class="inner">
             <p class="label" id="speedLabel">Current Speed</p>
             <p class="speed" id="speedValue">0.00</p>
             <p class="units">mbps</p>
-            <p class="progress" id="progressText">Ready to run test</p>
+            <p class="progress" id="progressText">Ready — 2 runs, then average</p>
           </div>
         </div>
         <div class="actions">
           <button class="start" id="startBtn">Start Download</button>
           <button class="cancel" id="cancelBtn" disabled>Cancel</button>
         </div>
-        <p class="status" id="status">Press Start Download to begin.</p>
+        <p class="status" id="status">Runs twice; the final mbps is the average. Press Start Download.</p>
       </section>
       <section class="panel panel-upload">
         <p class="label" style="margin:0 0 4px;font-weight:700;color:var(--purple-deep)">Upload</p>
+        <p class="two-runs-notice">This test runs <strong>twice</strong> in a row. The final number is the <strong>average</strong> of both runs. You need to finish both passes before the result is final.</p>
         <div class="ring" id="uploadRing" aria-hidden="true">
           <div class="inner">
             <p class="label" id="uploadSpeedLabel">Current Speed</p>
             <p class="speed" id="uploadSpeedValue">0.00</p>
             <p class="units" style="color:var(--purple-deep)">mbps</p>
-            <p class="progress" id="uploadProgressText">Ready to run test</p>
+            <p class="progress" id="uploadProgressText">Ready — 2 runs, then average</p>
           </div>
         </div>
         <div class="actions">
           <button class="start-upload" id="uploadStartBtn">Start Upload</button>
           <button class="cancel-upload" id="uploadCancelBtn" disabled>Cancel</button>
         </div>
-        <p class="status upload-status" id="uploadStatus">Press Start Upload to begin.</p>
+        <p class="status upload-status" id="uploadStatus">Runs twice; the final mbps is the average. Press Start Upload.</p>
       </section>
       </div>
       <section class="compare">
@@ -116,6 +120,7 @@
     const DEFAULT_ENDPOINT = window.location.origin + "/payload.bin";
     const UPLOAD_ENDPOINT = window.location.origin + "/upload.bin";
     const UPLOAD_CHUNK = 65536;
+    const TEST_RUNS = 2;
 
     const ring = document.getElementById("ring");
     const speedValue = document.getElementById("speedValue");
@@ -136,8 +141,10 @@
     const detail = document.getElementById("detail");
 
     let downloadController = null;
+    let downloadSessionAbort = false;
     let activeUploadXhr = null;
     let uploadPrepAbort = false;
+    let uploadSessionAbort = false;
     let downloadRunning = false;
     let uploadRunning = false;
     let finalMbps = null;
@@ -176,7 +183,7 @@
       cancelBtn.disabled = !running;
       uploadStartBtn.disabled = running || uploadRunning;
       ring.classList.toggle("pulse", running);
-      speedLabel.textContent = running ? "Current Speed" : "Final Result";
+      if (running) speedLabel.textContent = "Current Speed";
     }
 
     function setUploadRunning(running) {
@@ -184,14 +191,14 @@
       uploadStartBtn.disabled = running || downloadRunning;
       uploadCancelBtn.disabled = !running;
       uploadRing.classList.toggle("pulse", running);
-      uploadSpeedLabel.textContent = running ? "Current Speed" : "Final Result";
+      if (running) uploadSpeedLabel.textContent = "Current Speed";
     }
 
     function refreshDetailTip() {
       const tip = "Tip: reboot modem/router, test over ethernet, and retest at a low-traffic time.";
       const parts = [];
-      if (finalMbps != null) parts.push("Download: " + fmt(finalMbps, 2) + " mbps");
-      if (finalUploadMbps != null) parts.push("Upload: " + fmt(finalUploadMbps, 2) + " mbps");
+      if (finalMbps != null) parts.push("Download (avg of " + TEST_RUNS + "): " + fmt(finalMbps, 2) + " mbps");
+      if (finalUploadMbps != null) parts.push("Upload (avg of " + TEST_RUNS + "): " + fmt(finalUploadMbps, 2) + " mbps");
       if (parts.length) detail.textContent = parts.join(" · ") + ". " + tip;
     }
 
@@ -210,33 +217,24 @@
       evaluation.className = "evaluation";
       if (ratio >= 0.9) {
         evaluation.classList.add("ok");
-        evaluation.textContent = "Your download speed is " + measured + " mbps. This is excellent for your " + plan + " Mbps plan.";
+        evaluation.textContent =
+          "Your average download speed is " + measured + " mbps. This is excellent for your " + plan + " Mbps plan.";
       } else if (ratio >= 0.7) {
         evaluation.classList.add("warn");
-        evaluation.textContent = "Your download speed is " + measured + " mbps, a bit below your " + plan + " Mbps plan.";
+        evaluation.textContent =
+          "Your average download speed is " + measured + " mbps, a bit below your " + plan + " Mbps plan.";
       } else {
         evaluation.classList.add("bad");
-        evaluation.textContent = "Your download speed is " + measured + " mbps, underperforming for your " + plan + " Mbps plan.";
+        evaluation.textContent =
+          "Your average download speed is " + measured + " mbps, underperforming for your " + plan + " Mbps plan.";
       }
       refreshDetailTip();
     }
 
-    async function runDownloadTest() {
-      if (uploadRunning) return;
-      setDownloadRunning(true);
-      finalMbps = null;
-      planSelect.disabled = true;
-      planSelect.value = "";
-      resetEvaluation();
-      progressText.textContent = "Starting download...";
-      speedValue.textContent = "0.00";
-      setProgress(0);
-      setStatus("Running download test...");
-
+    async function runSingleDownloadPass(runIndex, totalRuns) {
       const cacheBust = Date.now() + "-" + Math.floor(Math.random() * 1e6);
       const testUrl = DEFAULT_ENDPOINT + "?bytes=" + DEFAULT_PAYLOAD_BYTES + "&cache_bust=" + cacheBust;
       downloadController = new AbortController();
-
       try {
         const start = performance.now();
         const response = await fetch(testUrl, {
@@ -260,6 +258,10 @@
         let received = 0;
 
         while (true) {
+          if (downloadSessionAbort) {
+            downloadController.abort();
+            throw new DOMException("Aborted", "AbortError");
+          }
           const { done, value } = await reader.read();
           if (done) break;
           received += value.byteLength;
@@ -271,22 +273,75 @@
 
           speedValue.textContent = fmt(currentMbps, 2);
           progressText.textContent =
-            "Downloaded " + (received / 1_048_576).toFixed(2) + " MB of " + (totalBytes / 1_048_576).toFixed(2) + " MB";
+            "Run " +
+            runIndex +
+            "/" +
+            totalRuns +
+            " — " +
+            (received / 1_048_576).toFixed(2) +
+            " / " +
+            (totalBytes / 1_048_576).toFixed(2) +
+            " MB";
           setProgress(percent);
         }
 
         const end = performance.now();
         const seconds = (end - start) / 1000;
         const fileMegabits = (received * 8) / 1_000_000;
-        finalMbps = fileMegabits / seconds;
+        return fileMegabits / seconds;
+      } finally {
+        downloadController = null;
+      }
+    }
 
+    async function runDownloadTest() {
+      if (uploadRunning) return;
+      downloadSessionAbort = false;
+      setDownloadRunning(true);
+      finalMbps = null;
+      planSelect.disabled = true;
+      planSelect.value = "";
+      resetEvaluation();
+      progressText.textContent = "Starting downloads...";
+      speedValue.textContent = "0.00";
+      setProgress(0);
+      setStatus("Running " + TEST_RUNS + " download passes...");
+
+      try {
+        const runResults = [];
+        for (let run = 1; run <= TEST_RUNS; run++) {
+          if (downloadSessionAbort) throw new DOMException("Aborted", "AbortError");
+          setStatus("Download run " + run + " of " + TEST_RUNS + " in progress...");
+          progressText.textContent = "Run " + run + " of " + TEST_RUNS + " — connecting...";
+          setProgress(0);
+          const mbps = await runSingleDownloadPass(run, TEST_RUNS);
+          runResults.push(mbps);
+          if (run < TEST_RUNS) {
+            if (downloadSessionAbort) throw new DOMException("Aborted", "AbortError");
+            progressText.textContent =
+              "Run " + run + " finished: " + fmt(mbps, 2) + " mbps. Starting run " + (run + 1) + "...";
+            setStatus("Between runs — starting download " + (run + 1) + " of " + TEST_RUNS + ".");
+            await new Promise((r) => setTimeout(r, 450));
+          }
+        }
+
+        finalMbps = runResults.reduce((a, b) => a + b, 0) / runResults.length;
         speedValue.textContent = fmt(finalMbps, 2);
-        progressText.textContent = "Download complete in " + seconds.toFixed(2) + "s";
+        speedLabel.textContent = "Average (final)";
+        progressText.textContent =
+          "Average of " +
+          TEST_RUNS +
+          " runs: " +
+          fmt(finalMbps, 2) +
+          " mbps (" +
+          runResults.map((x) => fmt(x, 2)).join(" & ") +
+          " mbps)";
         setProgress(100);
         setStatus("Download complete. Pick your plan to compare.");
         planSelect.disabled = false;
         refreshDetailTip();
       } catch (err) {
+        speedLabel.textContent = "Final Result";
         if (err.name === "AbortError") {
           setStatus("Download canceled.", true);
           progressText.textContent = "Canceled";
@@ -302,8 +357,90 @@
       }
     }
 
+    function executeOneUploadXHR(body, runIndex, totalRuns) {
+      const totalBytes = body.byteLength;
+      return new Promise((resolve, reject) => {
+        const cacheBust = Date.now() + "-" + Math.floor(Math.random() * 1e6);
+        const testUrl = UPLOAD_ENDPOINT + "?cache_bust=" + cacheBust;
+        const xhr = new XMLHttpRequest();
+        activeUploadXhr = xhr;
+        const start = performance.now();
+
+        xhr.timeout = 900000;
+
+        xhr.upload.addEventListener("progress", (e) => {
+          if (!e.lengthComputable || !e.total) return;
+          const elapsedSec = (performance.now() - start) / 1000;
+          const sent = e.loaded;
+          const megabits = (sent * 8) / 1_000_000;
+          const currentMbps = elapsedSec > 0 ? megabits / elapsedSec : 0;
+          const percent = (e.loaded / e.total) * 100;
+          uploadSpeedValue.textContent = fmt(currentMbps, 2);
+          uploadProgressText.textContent =
+            "Run " +
+            runIndex +
+            "/" +
+            totalRuns +
+            " — " +
+            (e.loaded / 1_048_576).toFixed(2) +
+            " / " +
+            (e.total / 1_048_576).toFixed(2) +
+            " MB";
+          setUploadProgress(percent);
+        });
+
+        function finishFailure(label) {
+          activeUploadXhr = null;
+          const snippet = (xhr.responseText || "").trim().slice(0, 120);
+          const detail =
+            xhr.status > 0
+              ? "HTTP " + xhr.status + (snippet ? ": " + snippet : "")
+              : label + (snippet ? " " + snippet : "");
+          reject(new Error(detail));
+        }
+
+        xhr.addEventListener("load", () => {
+          activeUploadXhr = null;
+          const end = performance.now();
+          const seconds = (end - start) / 1000;
+          if (xhr.status < 200 || xhr.status >= 300) {
+            finishFailure("Request failed");
+            return;
+          }
+          let receivedBytes = totalBytes;
+          try {
+            const data = JSON.parse(xhr.responseText || "{}");
+            if (data && typeof data.bytesReceived === "number") receivedBytes = data.bytesReceived;
+          } catch (e2) {
+            /* use totalBytes */
+          }
+          const fileMegabits = (receivedBytes * 8) / 1_000_000;
+          const mbps = seconds > 0 ? fileMegabits / seconds : 0;
+          resolve({ mbps, seconds });
+        });
+
+        xhr.addEventListener("error", () => {
+          finishFailure("Network error (connection reset or blocked)");
+        });
+
+        xhr.addEventListener("abort", () => {
+          activeUploadXhr = null;
+          reject(new DOMException("Aborted", "AbortError"));
+        });
+
+        xhr.addEventListener("timeout", () => {
+          finishFailure("Upload timed out");
+        });
+
+        xhr.open("POST", testUrl);
+        xhr.setRequestHeader("Content-Type", "application/octet-stream");
+        xhr.send(body);
+      });
+    }
+
     async function runUploadTest() {
       if (downloadRunning) return;
+      uploadSessionAbort = false;
       setUploadRunning(true);
       finalUploadMbps = null;
       uploadPrepAbort = false;
@@ -317,7 +454,7 @@
 
       try {
         for (let off = 0; off < totalBytes; off += UPLOAD_CHUNK) {
-          if (uploadPrepAbort) throw new DOMException("Aborted", "AbortError");
+          if (uploadPrepAbort || uploadSessionAbort) throw new DOMException("Aborted", "AbortError");
           const n = Math.min(UPLOAD_CHUNK, totalBytes - off);
           crypto.getRandomValues(body.subarray(off, off + n));
           if (off > 0 && off % (4 * 1024 * 1024) === 0) {
@@ -327,88 +464,43 @@
           }
         }
 
-        if (uploadPrepAbort) throw new DOMException("Aborted", "AbortError");
+        if (uploadPrepAbort || uploadSessionAbort) throw new DOMException("Aborted", "AbortError");
 
-        setUploadStatus("Running upload test...");
-        const cacheBust = Date.now() + "-" + Math.floor(Math.random() * 1e6);
-        const testUrl = UPLOAD_ENDPOINT + "?cache_bust=" + cacheBust;
-
-        const result = await new Promise((resolve, reject) => {
-          const xhr = new XMLHttpRequest();
-          activeUploadXhr = xhr;
-          const start = performance.now();
-
-          xhr.timeout = 900000;
-
-          xhr.upload.addEventListener("progress", (e) => {
-            if (!e.lengthComputable || !e.total) return;
-            const elapsedSec = (performance.now() - start) / 1000;
-            const sent = e.loaded;
-            const megabits = (sent * 8) / 1_000_000;
-            const currentMbps = elapsedSec > 0 ? megabits / elapsedSec : 0;
-            const percent = (e.loaded / e.total) * 100;
-            uploadSpeedValue.textContent = fmt(currentMbps, 2);
+        setUploadStatus("Running " + TEST_RUNS + " upload passes...");
+        const runResults = [];
+        for (let run = 1; run <= TEST_RUNS; run++) {
+          if (uploadSessionAbort) throw new DOMException("Aborted", "AbortError");
+          setUploadStatus("Upload run " + run + " of " + TEST_RUNS + " in progress...");
+          uploadProgressText.textContent = "Run " + run + " of " + TEST_RUNS + " — starting...";
+          setUploadProgress(0);
+          const result = await executeOneUploadXHR(body, run, TEST_RUNS);
+          runResults.push(result.mbps);
+          if (run < TEST_RUNS) {
+            if (uploadSessionAbort) throw new DOMException("Aborted", "AbortError");
             uploadProgressText.textContent =
-              "Uploaded " + (e.loaded / 1_048_576).toFixed(2) + " MB of " + (e.total / 1_048_576).toFixed(2) + " MB";
-            setUploadProgress(percent);
-          });
-
-          function finishFailure(label) {
-            activeUploadXhr = null;
-            const snippet = (xhr.responseText || "").trim().slice(0, 120);
-            const detail =
-              xhr.status > 0
-                ? "HTTP " + xhr.status + (snippet ? ": " + snippet : "")
-                : label + (snippet ? " " + snippet : "");
-            reject(new Error(detail));
+              "Run " + run + " finished: " + fmt(result.mbps, 2) + " mbps. Starting run " + (run + 1) + "...";
+            setUploadStatus("Between runs — starting upload " + (run + 1) + " of " + TEST_RUNS + ".");
+            await new Promise((r) => setTimeout(r, 450));
           }
+        }
 
-          xhr.addEventListener("load", () => {
-            activeUploadXhr = null;
-            const end = performance.now();
-            const seconds = (end - start) / 1000;
-            if (xhr.status < 200 || xhr.status >= 300) {
-              finishFailure("Request failed");
-              return;
-            }
-            let receivedBytes = totalBytes;
-            try {
-              const data = JSON.parse(xhr.responseText || "{}");
-              if (data && typeof data.bytesReceived === "number") receivedBytes = data.bytesReceived;
-            } catch (e2) {
-              /* use totalBytes */
-            }
-            const fileMegabits = (receivedBytes * 8) / 1_000_000;
-            const mbps = seconds > 0 ? fileMegabits / seconds : 0;
-            resolve({ mbps, seconds });
-          });
-
-          xhr.addEventListener("error", () => {
-            finishFailure("Network error (connection reset or blocked)");
-          });
-
-          xhr.addEventListener("abort", () => {
-            activeUploadXhr = null;
-            reject(new DOMException("Aborted", "AbortError"));
-          });
-
-          xhr.addEventListener("timeout", () => {
-            finishFailure("Upload timed out");
-          });
-
-          xhr.open("POST", testUrl);
-          xhr.setRequestHeader("Content-Type", "application/octet-stream");
-          xhr.send(body);
-        });
-
-        finalUploadMbps = result.mbps;
+        finalUploadMbps = runResults.reduce((a, b) => a + b, 0) / runResults.length;
         uploadSpeedValue.textContent = fmt(finalUploadMbps, 2);
-        uploadProgressText.textContent = "Upload complete in " + result.seconds.toFixed(2) + "s";
+        uploadSpeedLabel.textContent = "Average (final)";
+        uploadProgressText.textContent =
+          "Average of " +
+          TEST_RUNS +
+          " runs: " +
+          fmt(finalUploadMbps, 2) +
+          " mbps (" +
+          runResults.map((x) => fmt(x, 2)).join(" & ") +
+          " mbps)";
         setUploadProgress(100);
         setUploadStatus("Upload complete.");
         refreshDetailTip();
         if (planSelect.value) evaluateAgainstPlan();
       } catch (err) {
+        uploadSpeedLabel.textContent = "Final Result";
         if (err.name === "AbortError") {
           setUploadStatus("Upload canceled.", true);
           uploadProgressText.textContent = "Canceled";
@@ -432,6 +524,7 @@
     });
 
     cancelBtn.addEventListener("click", () => {
+      downloadSessionAbort = true;
       if (downloadController) downloadController.abort();
     });
 
@@ -440,6 +533,7 @@
     });
 
     uploadCancelBtn.addEventListener("click", () => {
+      uploadSessionAbort = true;
       uploadPrepAbort = true;
       if (activeUploadXhr) activeUploadXhr.abort();
     });
