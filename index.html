@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Spectrum Internet Speed Test</title>
   <style>
-    :root{--deep:#003087;--light:#0073D1;--bg:#f3f6fb;--txt:#10233f;--muted:#5d6b82;--ok:#0b7a3b;--warn:#b26a00;--bad:#b42318;--track:#dce7f7}
+    :root{--deep:#003087;--light:#0073D1;--bg:#f3f6fb;--txt:#10233f;--muted:#5d6b82;--ok:#0b7a3b;--warn:#b26a00;--bad:#b42318;--track:#dce7f7;--purple-deep:#5B21B6;--purple-light:#7C3AED;--purple-track:#EDE9FE}
     *{box-sizing:border-box}
     body{margin:0;min-height:100vh;font-family:Arial,"Segoe UI",Roboto,sans-serif;background:linear-gradient(140deg,#fff 0%,#eef4ff 45%,#e6f1ff 100%);color:var(--txt);display:grid;place-items:center;padding:24px}
     .app{width:min(920px,100%);background:#fff;border:1px solid #d8e3f4;border-radius:18px;box-shadow:0 22px 46px rgba(0,48,135,.14);overflow:hidden}
@@ -36,17 +36,30 @@
     .status{margin:0;padding:10px 12px;border-radius:10px;background:#f0f5ff;border:1px solid #d6e5fc;color:var(--deep);font-weight:600;min-height:44px}
     .disclaimer{margin:0;font-size:.89rem;color:var(--muted);line-height:1.45;background:#f8fafc;border:1px solid #e4ebf6;border-radius:10px;padding:12px}
     .small{font-size:.82rem;color:var(--muted)}
+    .tests-grid{display:grid;gap:24px;grid-template-columns:1fr}
+    @media (min-width:880px){.tests-grid{grid-template-columns:1fr 1fr}}
+    .panel-upload{background:#faf5ff;border-color:#e9d5ff}
+    .panel-upload .inner{border-color:#e9d5ff}
+    .panel-upload .speed{color:var(--purple-deep)}
+    .panel-upload .status.upload-status{background:#f5f3ff;border-color:#ddd6fe;color:var(--purple-deep)}
+    .panel-upload .status.upload-status.error{background:#faf5ff;border-color:#e9d5ff;color:var(--bad)}
+    .start-upload{color:#fff;background:linear-gradient(120deg,var(--purple-deep),var(--purple-light));min-width:160px}
+    .cancel-upload{color:var(--purple-deep);background:#ede9fe}
+    #uploadRing{background:conic-gradient(var(--purple-light) 0deg,var(--purple-track) 0deg 360deg);transition:background .2s ease}
+    .panel-upload .ring.pulse{box-shadow:0 0 20px rgba(124,58,237,.25)}
     @media (max-width:640px){.content{padding:16px}.ring{width:230px;height:230px}}
   </style>
 </head>
 <body>
   <main class="app">
     <header class="head">
-      <h1>Spectrum Internet Download Speed Test</h1>
-      <p>Measure your real-world download speed and compare it against your Spectrum tier.</p>
+      <h1>Spectrum Internet Speed Test</h1>
+      <p>Measure download and upload speeds and compare download results against your Spectrum tier.</p>
     </header>
     <section class="content">
+      <div class="tests-grid">
       <section class="panel">
+        <p class="label" style="margin:0 0 4px;font-weight:700;color:var(--deep)">Download</p>
         <div class="ring" id="ring" aria-hidden="true">
           <div class="inner">
             <p class="label" id="speedLabel">Current Speed</p>
@@ -56,11 +69,28 @@
           </div>
         </div>
         <div class="actions">
-          <button class="start" id="startBtn">Start Test</button>
+          <button class="start" id="startBtn">Start Download</button>
           <button class="cancel" id="cancelBtn" disabled>Cancel</button>
         </div>
-        <p class="status" id="status">Press Start Test to begin.</p>
+        <p class="status" id="status">Press Start Download to begin.</p>
       </section>
+      <section class="panel panel-upload">
+        <p class="label" style="margin:0 0 4px;font-weight:700;color:var(--purple-deep)">Upload</p>
+        <div class="ring" id="uploadRing" aria-hidden="true">
+          <div class="inner">
+            <p class="label" id="uploadSpeedLabel">Current Speed</p>
+            <p class="speed" id="uploadSpeedValue">0.00</p>
+            <p class="units" style="color:var(--purple-deep)">mbps</p>
+            <p class="progress" id="uploadProgressText">Ready to run test</p>
+          </div>
+        </div>
+        <div class="actions">
+          <button class="start-upload" id="uploadStartBtn">Start Upload</button>
+          <button class="cancel-upload" id="uploadCancelBtn" disabled>Cancel</button>
+        </div>
+        <p class="status upload-status" id="uploadStatus">Press Start Upload to begin.</p>
+      </section>
+      </div>
       <section class="compare">
         <h2>Spectrum Tier Comparison</h2>
         <label for="planSelect">Choose your Spectrum plan:</label>
@@ -81,7 +111,10 @@
   </main>
   <script>
     const DEFAULT_PAYLOAD_BYTES = 134217728;
+    const UPLOAD_PAYLOAD_BYTES = DEFAULT_PAYLOAD_BYTES;
     const DEFAULT_ENDPOINT = window.location.origin + "/payload.bin";
+    const UPLOAD_ENDPOINT = window.location.origin + "/upload.bin";
+    const UPLOAD_CHUNK = 256 * 1024;
 
     const ring = document.getElementById("ring");
     const speedValue = document.getElementById("speedValue");
@@ -90,13 +123,23 @@
     const statusEl = document.getElementById("status");
     const startBtn = document.getElementById("startBtn");
     const cancelBtn = document.getElementById("cancelBtn");
+    const uploadRing = document.getElementById("uploadRing");
+    const uploadSpeedValue = document.getElementById("uploadSpeedValue");
+    const uploadSpeedLabel = document.getElementById("uploadSpeedLabel");
+    const uploadProgressText = document.getElementById("uploadProgressText");
+    const uploadStatusEl = document.getElementById("uploadStatus");
+    const uploadStartBtn = document.getElementById("uploadStartBtn");
+    const uploadCancelBtn = document.getElementById("uploadCancelBtn");
     const planSelect = document.getElementById("planSelect");
     const evaluation = document.getElementById("evaluation");
     const detail = document.getElementById("detail");
 
-    let controller = null;
-    let isRunning = false;
+    let downloadController = null;
+    let uploadController = null;
+    let downloadRunning = false;
+    let uploadRunning = false;
     let finalMbps = null;
+    let finalUploadMbps = null;
 
     function fmt(n, digits = 2) {
       return Number.isFinite(n) ? n.toFixed(digits) : "0.00";
@@ -107,6 +150,12 @@
       ring.style.background = "conic-gradient(var(--light) " + angle + "deg, var(--track) " + angle + "deg 360deg)";
     }
 
+    function setUploadProgress(percent) {
+      const angle = Math.min(360, Math.max(0, percent * 3.6));
+      uploadRing.style.background =
+        "conic-gradient(var(--purple-light) " + angle + "deg, var(--purple-track) " + angle + "deg 360deg)";
+    }
+
     function setStatus(msg, isError = false) {
       statusEl.textContent = msg;
       statusEl.style.color = isError ? "var(--bad)" : "var(--deep)";
@@ -114,18 +163,41 @@
       statusEl.style.borderColor = isError ? "#f6d1ce" : "#d6e5fc";
     }
 
-    function setRunning(running) {
-      isRunning = running;
+    function setUploadStatus(msg, isError = false) {
+      uploadStatusEl.textContent = msg;
+      uploadStatusEl.className = "status upload-status" + (isError ? " error" : "");
+    }
+
+    function setDownloadRunning(running) {
+      downloadRunning = running;
       startBtn.disabled = running;
       cancelBtn.disabled = !running;
+      uploadStartBtn.disabled = running || uploadRunning;
       ring.classList.toggle("pulse", running);
       speedLabel.textContent = running ? "Current Speed" : "Final Result";
+    }
+
+    function setUploadRunning(running) {
+      uploadRunning = running;
+      uploadStartBtn.disabled = running || downloadRunning;
+      uploadCancelBtn.disabled = !running;
+      uploadRing.classList.toggle("pulse", running);
+      uploadSpeedLabel.textContent = running ? "Current Speed" : "Final Result";
+    }
+
+    function refreshDetailTip() {
+      const tip = "Tip: reboot modem/router, test over ethernet, and retest at a low-traffic time.";
+      const parts = [];
+      if (finalMbps != null) parts.push("Download: " + fmt(finalMbps, 2) + " mbps");
+      if (finalUploadMbps != null) parts.push("Upload: " + fmt(finalUploadMbps, 2) + " mbps");
+      if (parts.length) detail.textContent = parts.join(" · ") + ". " + tip;
     }
 
     function resetEvaluation() {
       evaluation.textContent = "Select your plan to compare.";
       evaluation.className = "evaluation";
       detail.textContent = "";
+      refreshDetailTip();
     }
 
     function evaluateAgainstPlan() {
@@ -136,19 +208,20 @@
       evaluation.className = "evaluation";
       if (ratio >= 0.9) {
         evaluation.classList.add("ok");
-        evaluation.textContent = "Your speed is " + measured + " mbps. This is excellent for your " + plan + " Mbps plan.";
+        evaluation.textContent = "Your download speed is " + measured + " mbps. This is excellent for your " + plan + " Mbps plan.";
       } else if (ratio >= 0.7) {
         evaluation.classList.add("warn");
-        evaluation.textContent = "Your speed is " + measured + " mbps, a bit below your " + plan + " Mbps plan.";
+        evaluation.textContent = "Your download speed is " + measured + " mbps, a bit below your " + plan + " Mbps plan.";
       } else {
         evaluation.classList.add("bad");
-        evaluation.textContent = "Your speed is " + measured + " mbps, underperforming for your " + plan + " Mbps plan.";
+        evaluation.textContent = "Your download speed is " + measured + " mbps, underperforming for your " + plan + " Mbps plan.";
       }
-      detail.textContent = "Tip: reboot modem/router, test over ethernet, and retest at a low-traffic time.";
+      refreshDetailTip();
     }
 
     async function runDownloadTest() {
-      setRunning(true);
+      if (uploadRunning) return;
+      setDownloadRunning(true);
       finalMbps = null;
       planSelect.disabled = true;
       planSelect.value = "";
@@ -156,18 +229,18 @@
       progressText.textContent = "Starting download...";
       speedValue.textContent = "0.00";
       setProgress(0);
-      setStatus("Running speed test...");
+      setStatus("Running download test...");
 
       const cacheBust = Date.now() + "-" + Math.floor(Math.random() * 1e6);
       const testUrl = DEFAULT_ENDPOINT + "?bytes=" + DEFAULT_PAYLOAD_BYTES + "&cache_bust=" + cacheBust;
-      controller = new AbortController();
+      downloadController = new AbortController();
 
       try {
         const start = performance.now();
         const response = await fetch(testUrl, {
           method: "GET",
           cache: "no-store",
-          signal: controller.signal
+          signal: downloadController.signal
         });
 
         if (!response.ok || !response.body) {
@@ -195,7 +268,8 @@
           const percent = totalBytes > 0 ? (received / totalBytes) * 100 : 0;
 
           speedValue.textContent = fmt(currentMbps, 2);
-          progressText.textContent = "Downloaded " + (received / 1_048_576).toFixed(2) + " MB of " + (totalBytes / 1_048_576).toFixed(2) + " MB";
+          progressText.textContent =
+            "Downloaded " + (received / 1_048_576).toFixed(2) + " MB of " + (totalBytes / 1_048_576).toFixed(2) + " MB";
           setProgress(percent);
         }
 
@@ -207,11 +281,12 @@
         speedValue.textContent = fmt(finalMbps, 2);
         progressText.textContent = "Download complete in " + seconds.toFixed(2) + "s";
         setProgress(100);
-        setStatus("Test complete. Pick your plan to compare.");
+        setStatus("Download complete. Pick your plan to compare.");
         planSelect.disabled = false;
+        refreshDetailTip();
       } catch (err) {
         if (err.name === "AbortError") {
-          setStatus("Test canceled.", true);
+          setStatus("Download canceled.", true);
           progressText.textContent = "Canceled";
         } else {
           setStatus("Network error occurred. Please check your connection and try again.", true);
@@ -220,17 +295,119 @@
         speedValue.textContent = "0.00";
         setProgress(0);
       } finally {
-        setRunning(false);
-        controller = null;
+        setDownloadRunning(false);
+        downloadController = null;
+      }
+    }
+
+    async function runUploadTest() {
+      if (downloadRunning) return;
+      setUploadRunning(true);
+      finalUploadMbps = null;
+      uploadProgressText.textContent = "Starting upload...";
+      uploadSpeedValue.textContent = "0.00";
+      setUploadProgress(0);
+      setUploadStatus("Running upload test...");
+
+      const cacheBust = Date.now() + "-" + Math.floor(Math.random() * 1e6);
+      const testUrl = UPLOAD_ENDPOINT + "?cache_bust=" + cacheBust;
+      uploadController = new AbortController();
+
+      const totalBytes = UPLOAD_PAYLOAD_BYTES;
+      let sent = 0;
+      const start = performance.now();
+
+      const stream = new ReadableStream({
+        pull(controller) {
+          if (sent >= totalBytes) {
+            controller.close();
+            return;
+          }
+          const n = Math.min(UPLOAD_CHUNK, totalBytes - sent);
+          const buf = new Uint8Array(n);
+          crypto.getRandomValues(buf);
+          sent += buf.byteLength;
+          controller.enqueue(buf);
+          const elapsedSec = (performance.now() - start) / 1000;
+          const megabits = (sent * 8) / 1_000_000;
+          const currentMbps = elapsedSec > 0 ? megabits / elapsedSec : 0;
+          const percent = totalBytes > 0 ? (sent / totalBytes) * 100 : 0;
+          uploadSpeedValue.textContent = fmt(currentMbps, 2);
+          uploadProgressText.textContent =
+            "Uploaded " + (sent / 1_048_576).toFixed(2) + " MB of " + (totalBytes / 1_048_576).toFixed(2) + " MB";
+          setUploadProgress(percent);
+        }
+      });
+
+      try {
+        const response = await fetch(testUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/octet-stream" },
+          body: stream,
+          duplex: "half",
+          cache: "no-store",
+          signal: uploadController.signal
+        });
+
+        const end = performance.now();
+        const seconds = (end - start) / 1000;
+
+        if (!response.ok) {
+          throw new Error("Upload failed.");
+        }
+
+        let receivedBytes = sent;
+        try {
+          const data = await response.json();
+          if (data && typeof data.bytesReceived === "number") {
+            receivedBytes = data.bytesReceived;
+          }
+        } catch (e) {
+          /* use sent */
+        }
+
+        const fileMegabits = (receivedBytes * 8) / 1_000_000;
+        finalUploadMbps = seconds > 0 ? fileMegabits / seconds : 0;
+
+        uploadSpeedValue.textContent = fmt(finalUploadMbps, 2);
+        uploadProgressText.textContent = "Upload complete in " + seconds.toFixed(2) + "s";
+        setUploadProgress(100);
+        setUploadStatus("Upload complete.");
+        refreshDetailTip();
+        if (planSelect.value) evaluateAgainstPlan();
+      } catch (err) {
+        if (err.name === "AbortError") {
+          setUploadStatus("Upload canceled.", true);
+          uploadProgressText.textContent = "Canceled";
+        } else {
+          setUploadStatus(
+            "Upload failed. Your browser may not support streaming uploads, or the connection dropped. Try again.",
+            true
+          );
+          uploadProgressText.textContent = "Failed";
+        }
+        uploadSpeedValue.textContent = "0.00";
+        setUploadProgress(0);
+      } finally {
+        setUploadRunning(false);
+        uploadController = null;
       }
     }
 
     startBtn.addEventListener("click", () => {
-      if (!isRunning) runDownloadTest();
+      if (!downloadRunning) runDownloadTest();
     });
 
     cancelBtn.addEventListener("click", () => {
-      if (controller) controller.abort();
+      if (downloadController) downloadController.abort();
+    });
+
+    uploadStartBtn.addEventListener("click", () => {
+      if (!uploadRunning) runUploadTest();
+    });
+
+    uploadCancelBtn.addEventListener("click", () => {
+      if (uploadController) uploadController.abort();
     });
 
     planSelect.addEventListener("change", evaluateAgainstPlan);

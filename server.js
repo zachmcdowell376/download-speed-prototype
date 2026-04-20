@@ -67,8 +67,48 @@ function sendPayload(req, res, url) {
   writeChunk();
 }
 
+function handleUpload(req, res) {
+  let received = 0;
+  req.on("data", (chunk) => {
+    received += chunk.length;
+  });
+  req.on("end", () => {
+    res.writeHead(200, {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "no-store"
+    });
+    res.end(JSON.stringify({ ok: true, bytesReceived: received }));
+  });
+  req.on("error", () => {
+    if (!res.headersSent) {
+      res.writeHead(400, { "Content-Type": "text/plain; charset=utf-8" });
+    }
+    res.end("Bad request");
+  });
+}
+
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
+
+  if (url.pathname === "/upload.bin") {
+    if (req.method === "OPTIONS") {
+      res.writeHead(204, {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Max-Age": "86400"
+      });
+      res.end();
+      return;
+    }
+    if (req.method === "POST") {
+      handleUpload(req, res);
+      return;
+    }
+    res.writeHead(405, { "Content-Type": "text/plain; charset=utf-8" });
+    res.end("Method not allowed");
+    return;
+  }
 
   if (req.method !== "GET") {
     res.writeHead(405, { "Content-Type": "text/plain; charset=utf-8" });
