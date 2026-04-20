@@ -135,7 +135,8 @@
     const detail = document.getElementById("detail");
 
     let downloadController = null;
-    let uploadController = null;
+    let activeUploadXhr = null;
+    let uploadPrepAbort = false;
     let downloadRunning = false;
     let uploadRunning = false;
     let finalMbps = null;
@@ -304,73 +305,90 @@
       if (downloadRunning) return;
       setUploadRunning(true);
       finalUploadMbps = null;
-      uploadProgressText.textContent = "Starting upload...";
+      uploadPrepAbort = false;
+      uploadProgressText.textContent = "Preparing upload...";
       uploadSpeedValue.textContent = "0.00";
       setUploadProgress(0);
-      setUploadStatus("Running upload test...");
-
-      const cacheBust = Date.now() + "-" + Math.floor(Math.random() * 1e6);
-      const testUrl = UPLOAD_ENDPOINT + "?cache_bust=" + cacheBust;
-      uploadController = new AbortController();
+      setUploadStatus("Building upload payload (in-memory)...");
 
       const totalBytes = UPLOAD_PAYLOAD_BYTES;
-      let sent = 0;
-      const start = performance.now();
-
-      const stream = new ReadableStream({
-        pull(controller) {
-          if (sent >= totalBytes) {
-            controller.close();
-            return;
-          }
-          const n = Math.min(UPLOAD_CHUNK, totalBytes - sent);
-          const buf = new Uint8Array(n);
-          crypto.getRandomValues(buf);
-          sent += buf.byteLength;
-          controller.enqueue(buf);
-          const elapsedSec = (performance.now() - start) / 1000;
-          const megabits = (sent * 8) / 1_000_000;
-          const currentMbps = elapsedSec > 0 ? megabits / elapsedSec : 0;
-          const percent = totalBytes > 0 ? (sent / totalBytes) * 100 : 0;
-          uploadSpeedValue.textContent = fmt(currentMbps, 2);
-          uploadProgressText.textContent =
-            "Uploaded " + (sent / 1_048_576).toFixed(2) + " MB of " + (totalBytes / 1_048_576).toFixed(2) + " MB";
-          setUploadProgress(percent);
-        }
-      });
+      const body = new Uint8Array(totalBytes);
 
       try {
-        const response = await fetch(testUrl, {
-          method: "POST",
-          headers: { "Content-Type": "application/octet-stream" },
-          body: stream,
-          duplex: "half",
-          cache: "no-store",
-          signal: uploadController.signal
+        for (let off = 0; off < totalBytes; off += UPLOAD_CHUNK) {
+          if (uploadPrepAbort) throw new DOMException("Aborted", "AbortError");
+          const n = Math.min(UPLOAD_CHUNK, totalBytes - off);
+          crypto.getRandomValues(body.subarray(off, off + n));
+          if (off > 0 && off % (4 * 1024 * 1024) === 0) {
+            uploadProgressText.textContent =
+              "Preparing " + (Math.min(off + n, totalBytes) / 1_048_576).toFixed(2) + " MB...";
+            await new Promise((r) => setTimeout(r, 0));
+          }
+        }
+
+        if (uploadPrepAbort) throw new DOMException("Aborted", "AbortError");
+
+        setUploadStatus("Running upload test...");
+        const cacheBust = Date.now() + "-" + Math.floor(Math.random() * 1e6);
+        const testUrl = UPLOAD_ENDPOINT + "?cache_bust=" + cacheBust;
+
+        const result = await new Promise((resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+          activeUploadXhr = xhr;
+          const start = performance.now();
+
+          xhr.upload.addEventListener("progress", (e) => {
+            if (!e.lengthComputable || !e.total) return;
+            const elapsedSec = (performance.now() - start) / 1000;
+            const sent = e.loaded;
+            const megabits = (sent * 8) / 1_000_000;
+            const currentMbps = elapsedSec > 0 ? megabits / elapsedSec : 0;
+            const percent = (e.loaded / e.total) * 100;
+            uploadSpeedValue.textContent = fmt(currentMbps, 2);
+            uploadProgressText.textContent =
+              "Uploaded " + (e.loaded / 1_048_576).toFixed(2) + " MB of " + (e.total / 1_048_576).toFixed(2) + " MB";
+            setUploadProgress(percent);
+          });
+
+          xhr.addEventListener("load", () => {
+            activeUploadXhr = null;
+            const end = performance.now();
+            const seconds = (end - start) / 1000;
+            if (xhr.status < 200 || xhr.status >= 300) {
+              reject(new Error("HTTP " + xhr.status));
+              return;
+            }
+            let receivedBytes = totalBytes;
+            try {
+              const data = xhr.response;
+              if (data && typeof data.bytesReceived === "number") receivedBytes = data.bytesReceived;
+            } catch (e2) {
+              /* use totalBytes */
+            }
+            const fileMegabits = (receivedBytes * 8) / 1_000_000;
+            const mbps = seconds > 0 ? fileMegabits / seconds : 0;
+            resolve({ mbps, seconds });
+          });
+
+          xhr.addEventListener("error", () => {
+            activeUploadXhr = null;
+            reject(new Error("Network error"));
+          });
+
+          xhr.addEventListener("abort", () => {
+            activeUploadXhr = null;
+            reject(new DOMException("Aborted", "AbortError"));
+          });
+
+          xhr.open("POST", testUrl);
+          xhr.responseType = "json";
+          xhr.setRequestHeader("Content-Type", "application/octet-stream");
+          xhr.send(body);
         });
 
-        const end = performance.now();
-        const seconds = (end - start) / 1000;
-
-        if (!response.ok) {
-          throw new Error("Upload failed.");
-        }
-
-        let receivedBytes = sent;
-        try {
-          const data = await response.json();
-          if (data && typeof data.bytesReceived === "number") {
-            receivedBytes = data.bytesReceived;
-          }
-        } catch (e) {
-          /* use sent */
-        }
-
-        const fileMegabits = (receivedBytes * 8) / 1_000_000;
-        finalUploadMbps = seconds > 0 ? fileMegabits / seconds : 0;
-
+        finalUploadMbps = result.mbps;
         uploadSpeedValue.textContent = fmt(finalUploadMbps, 2);
-        uploadProgressText.textContent = "Upload complete in " + seconds.toFixed(2) + "s";
+        uploadProgressText.textContent = "Upload complete in " + result.seconds.toFixed(2) + "s";
         setUploadProgress(100);
         setUploadStatus("Upload complete.");
         refreshDetailTip();
@@ -381,7 +399,7 @@
           uploadProgressText.textContent = "Canceled";
         } else {
           setUploadStatus(
-            "Upload failed. Your browser may not support streaming uploads, or the connection dropped. Try again.",
+            "Upload failed. Check your connection or try a smaller payload. (" + (err.message || "error") + ")",
             true
           );
           uploadProgressText.textContent = "Failed";
@@ -390,7 +408,7 @@
         setUploadProgress(0);
       } finally {
         setUploadRunning(false);
-        uploadController = null;
+        activeUploadXhr = null;
       }
     }
 
@@ -407,7 +425,8 @@
     });
 
     uploadCancelBtn.addEventListener("click", () => {
-      if (uploadController) uploadController.abort();
+      uploadPrepAbort = true;
+      if (activeUploadXhr) activeUploadXhr.abort();
     });
 
     planSelect.addEventListener("change", evaluateAgainstPlan);
