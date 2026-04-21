@@ -31,6 +31,10 @@
     .compare{border:1px solid #dfebfd;background:#fbfdff;border-radius:14px;padding:16px;display:grid;gap:12px}
     .compare h2{margin:0;font-size:1.05rem;color:var(--deep)}
     select{width:100%;padding:10px 12px;border-radius:10px;border:1px solid #c8d9f3;font-size:.98rem;color:var(--txt);background:#fff}
+    .server-controls{display:grid;gap:10px;padding:10px;border:1px solid #e2e8f6;border-radius:10px;background:#f8fbff}
+    .server-controls .inline{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+    .server-controls button{padding:9px 16px;font-size:.9rem;background:#e8f0ff;color:var(--deep);border:1px solid #d5e3fd}
+    .server-controls button:disabled{opacity:.6}
     .evaluation{margin:0;min-height:1.2em;font-weight:700}
     .ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}
     .status{margin:0;padding:10px 12px;border-radius:10px;background:#f0f5ff;border:1px solid #d6e5fc;color:var(--deep);font-weight:600;min-height:44px}
@@ -97,6 +101,21 @@
       </div>
       <section class="compare">
         <h2>Spectrum Tier Comparison</h2>
+        <div class="server-controls">
+          <label for="serverMode">Server selection mode:</label>
+          <select id="serverMode">
+            <option value="auto" selected>Auto (closest + fastest probe)</option>
+            <option value="manual">Manual override</option>
+          </select>
+          <label for="serverSelect">Test server:</label>
+          <select id="serverSelect" disabled>
+            <option value="">Loading available servers...</option>
+          </select>
+          <div class="inline">
+            <button id="refreshServersBtn" type="button">Re-test Server Choice</button>
+          </div>
+          <p class="small" id="serverDetail">Preparing server list...</p>
+        </div>
         <label for="planSelect">Choose your Spectrum plan:</label>
         <select id="planSelect" disabled>
           <option value="">Select plan</option>
@@ -118,13 +137,16 @@
     const DEFAULT_PAYLOAD_BYTES = 268435456;
     const DOWNLOAD_WARMUP_BYTES = 67108864;
     const UPLOAD_PAYLOAD_BYTES = 32 * 1024 * 1024;
-    const DEFAULT_ENDPOINT = window.location.origin + "/payload.bin";
-    const UPLOAD_ENDPOINT = window.location.origin + "/upload.bin";
     const UPLOAD_CHUNK = 65536;
     const DOWNLOAD_TEST_RUNS = 4;
     const UPLOAD_TEST_RUNS = 2;
     const DOWNLOAD_PARALLEL_STREAMS = 4;
     const UPLOAD_PARALLEL_STREAMS = 2;
+    const SERVER_REGISTRY_ENDPOINT = window.location.origin + "/api/servers";
+    const SERVER_PING_SAMPLES = 3;
+    const SERVER_FINALIST_COUNT = 3;
+    const SERVER_PROBE_BYTES = 8 * 1024 * 1024;
+    const SERVER_REQUEST_TIMEOUT_MS = 5000;
 
     const ring = document.getElementById("ring");
     const speedValue = document.getElementById("speedValue");
@@ -141,26 +163,11 @@
     const uploadStartBtn = document.getElementById("uploadStartBtn");
     const uploadCancelBtn = document.getElementById("uploadCancelBtn");
     const downloadRunsNotice = document.getElementById("downloadRunsNotice");
+    const serverModeSelect = document.getElementById("serverMode");
+    const serverSelect = document.getElementById("serverSelect");
+    const refreshServersBtn = document.getElementById("refreshServersBtn");
+    const serverDetail = document.getElementById("serverDetail");
     const planSelect = document.getElementById("planSelect");
-    downloadRunsNotice.innerHTML =
-      "This test runs <strong>1 warm-up</strong> plus <strong>" +
-      DOWNLOAD_TEST_RUNS +
-      " measured runs</strong>. The final number is a <strong>trimmed average</strong> to reduce volatility.";
-
-    function average(values) {
-      if (!values.length) return 0;
-      return values.reduce((sum, value) => sum + value, 0) / values.length;
-    }
-
-    function computeStableMbps(runResults) {
-      if (!runResults.length) return 0;
-      if (runResults.length >= 3) {
-        const sorted = [...runResults].sort((a, b) => a - b);
-        return average(sorted.slice(1, -1));
-      }
-      return average(runResults);
-    }
-
     const evaluation = document.getElementById("evaluation");
     const detail = document.getElementById("detail");
 
@@ -173,9 +180,42 @@
     let uploadRunning = false;
     let finalMbps = null;
     let finalUploadMbps = null;
+    let availableServers = [];
+    let selectedServer = null;
+
+    downloadRunsNotice.innerHTML =
+      "This test runs <strong>1 warm-up</strong> plus <strong>" +
+      DOWNLOAD_TEST_RUNS +
+      " measured runs</strong>. The final number is a <strong>trimmed average</strong> to reduce volatility.";
 
     function fmt(n, digits = 2) {
       return Number.isFinite(n) ? n.toFixed(digits) : "0.00";
+    }
+
+    function wait(ms) {
+      return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
+    function average(values) {
+      if (!values.length) return 0;
+      return values.reduce((sum, value) => sum + value, 0) / values.length;
+    }
+
+    function median(values) {
+      if (!values.length) return Infinity;
+      const sorted = [...values].sort((a, b) => a - b);
+      const mid = Math.floor(sorted.length / 2);
+      if (sorted.length % 2 === 0) return (sorted[mid - 1] + sorted[mid]) / 2;
+      return sorted[mid];
+    }
+
+    function computeStableMbps(runResults) {
+      if (!runResults.length) return 0;
+      if (runResults.length >= 3) {
+        const sorted = [...runResults].sort((a, b) => a - b);
+        return average(sorted.slice(1, -1));
+      }
+      return average(runResults);
     }
 
     function splitBytes(totalBytes, parts) {
@@ -212,6 +252,34 @@
       uploadStatusEl.className = "status upload-status" + (isError ? " error" : "");
     }
 
+    function setServerDetail(msg, isError = false) {
+      serverDetail.textContent = msg;
+      serverDetail.style.color = isError ? "var(--bad)" : "var(--muted)";
+    }
+
+    function describeServer(server) {
+      return server.label + " (" + server.region + ")";
+    }
+
+    function getSelectedBaseUrl() {
+      return selectedServer && selectedServer.baseUrl ? selectedServer.baseUrl : window.location.origin;
+    }
+
+    function getDownloadEndpoint() {
+      return getSelectedBaseUrl() + "/payload.bin";
+    }
+
+    function getUploadEndpoint() {
+      return getSelectedBaseUrl() + "/upload.bin";
+    }
+
+    function syncServerControls() {
+      const locked = downloadRunning || uploadRunning;
+      serverModeSelect.disabled = locked || availableServers.length <= 1;
+      serverSelect.disabled = locked || serverModeSelect.value !== "manual" || !availableServers.length;
+      refreshServersBtn.disabled = locked || !availableServers.length;
+    }
+
     function setDownloadRunning(running) {
       downloadRunning = running;
       startBtn.disabled = running;
@@ -219,6 +287,7 @@
       uploadStartBtn.disabled = running || uploadRunning;
       ring.classList.toggle("pulse", running);
       if (running) speedLabel.textContent = "Current Speed";
+      syncServerControls();
     }
 
     function setUploadRunning(running) {
@@ -227,6 +296,7 @@
       uploadCancelBtn.disabled = !running;
       uploadRing.classList.toggle("pulse", running);
       if (running) uploadSpeedLabel.textContent = "Current Speed";
+      syncServerControls();
     }
 
     function refreshDetailTip() {
@@ -276,6 +346,177 @@
       refreshDetailTip();
     }
 
+    function withTimeoutFetch(url, options = {}, timeoutMs = SERVER_REQUEST_TIMEOUT_MS) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      return fetch(url, { ...options, signal: controller.signal }).finally(() => clearTimeout(timer));
+    }
+
+    function normalizeServer(raw, index) {
+      if (!raw || typeof raw !== "object") return null;
+      let baseUrl = "";
+      try {
+        baseUrl = new URL(raw.baseUrl || "").origin;
+      } catch (error) {
+        return null;
+      }
+      return {
+        id: String(raw.id || "node-" + (index + 1)),
+        label: String(raw.label || "Speed Node " + (index + 1)),
+        region: String(raw.region || "Auto"),
+        baseUrl: baseUrl.replace(/\/+$/, "")
+      };
+    }
+
+    function fallbackServer() {
+      return {
+        id: "current-origin",
+        label: "Current Host",
+        region: "Local",
+        baseUrl: window.location.origin
+      };
+    }
+
+    async function fetchServerList() {
+      try {
+        const cacheBust = Date.now() + "-" + Math.floor(Math.random() * 1e6);
+        const response = await withTimeoutFetch(SERVER_REGISTRY_ENDPOINT + "?cache_bust=" + cacheBust, {
+          method: "GET",
+          cache: "no-store"
+        });
+        if (!response.ok) throw new Error("Server list request failed");
+        const payload = await response.json();
+        const list = Array.isArray(payload.servers) ? payload.servers : [];
+        const normalized = list.map(normalizeServer).filter(Boolean);
+        return normalized.length ? normalized : [fallbackServer()];
+      } catch (error) {
+        return [fallbackServer()];
+      }
+    }
+
+    function renderServerOptions() {
+      serverSelect.innerHTML = "";
+      if (!availableServers.length) {
+        const option = document.createElement("option");
+        option.value = "";
+        option.textContent = "No servers available";
+        serverSelect.appendChild(option);
+        return;
+      }
+      availableServers.forEach((server) => {
+        const option = document.createElement("option");
+        option.value = server.id;
+        option.textContent = server.label + " - " + server.region;
+        serverSelect.appendChild(option);
+      });
+    }
+
+    function setSelectedServer(server, reasonText) {
+      selectedServer = server;
+      if (serverSelect.querySelector('option[value="' + server.id + '"]')) {
+        serverSelect.value = server.id;
+      }
+      setServerDetail("Testing against " + describeServer(server) + ". " + reasonText);
+    }
+
+    async function measureServerRtt(server) {
+      const samples = [];
+      for (let i = 0; i < SERVER_PING_SAMPLES; i++) {
+        const pingUrl = server.baseUrl + "/ping?cache_bust=" + Date.now() + "-" + i;
+        const startedAt = performance.now();
+        try {
+          const response = await withTimeoutFetch(pingUrl, { method: "GET", cache: "no-store", mode: "cors" });
+          if (!response.ok) continue;
+          samples.push(performance.now() - startedAt);
+        } catch (error) {
+          /* ignore failed sample */
+        }
+        await wait(60);
+      }
+      return samples.length ? median(samples) : Infinity;
+    }
+
+    async function runDownloadProbe(server) {
+      const cacheBust = Date.now() + "-" + Math.floor(Math.random() * 1e6);
+      const probeUrl = server.baseUrl + "/payload.bin?bytes=" + SERVER_PROBE_BYTES + "&cache_bust=" + cacheBust;
+      const startedAt = performance.now();
+      const response = await withTimeoutFetch(probeUrl, { method: "GET", cache: "no-store", mode: "cors" }, 12000);
+      if (!response.ok || !response.body) throw new Error("Probe failed");
+      const reader = response.body.getReader();
+      let total = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+      }
+      const elapsedSec = (performance.now() - startedAt) / 1000;
+      return elapsedSec > 0 ? (total * 8) / 1_000_000 / elapsedSec : 0;
+    }
+
+    async function autoSelectServer() {
+      if (!availableServers.length) throw new Error("No available servers");
+      setServerDetail("Checking closest servers by latency...");
+      const latencyResults = await Promise.all(
+        availableServers.map(async (server) => ({ server, rtt: await measureServerRtt(server) }))
+      );
+      const reachable = latencyResults.filter((result) => Number.isFinite(result.rtt));
+      if (!reachable.length) throw new Error("No reachable speed servers");
+      reachable.sort((a, b) => a.rtt - b.rtt);
+      const finalists = reachable.slice(0, Math.min(SERVER_FINALIST_COUNT, reachable.length));
+
+      if (finalists.length === 1) {
+        const only = finalists[0];
+        setSelectedServer(only.server, "Auto-selected by RTT (" + fmt(only.rtt, 1) + " ms).");
+        return;
+      }
+
+      setServerDetail("Running quick throughput probes on top servers...");
+      const probed = await Promise.all(
+        finalists.map(async (entry) => {
+          let probeMbps = 0;
+          try {
+            probeMbps = await runDownloadProbe(entry.server);
+          } catch (error) {
+            probeMbps = 0;
+          }
+          return { ...entry, probeMbps };
+        })
+      );
+      probed.sort((a, b) => b.probeMbps - a.probeMbps || a.rtt - b.rtt);
+      const best = probed[0];
+      setSelectedServer(
+        best.server,
+        "Auto-selected using RTT " + fmt(best.rtt, 1) + " ms and probe " + fmt(best.probeMbps, 2) + " mbps."
+      );
+    }
+
+    async function ensureServerSelected() {
+      if (selectedServer) return true;
+      availableServers = await fetchServerList();
+      renderServerOptions();
+      if (!availableServers.length) return false;
+      await autoSelectServer();
+      syncServerControls();
+      return true;
+    }
+
+    async function initializeServerSelection() {
+      setServerDetail("Loading server list...");
+      availableServers = await fetchServerList();
+      renderServerOptions();
+      if (!availableServers.length) {
+        setServerDetail("No speed servers available.", true);
+        syncServerControls();
+        return;
+      }
+      try {
+        await autoSelectServer();
+      } catch (error) {
+        setSelectedServer(availableServers[0], "Fallback selection.");
+      }
+      syncServerControls();
+    }
+
     async function runSingleDownloadPass(runIndex, totalRuns, payloadBytes = DEFAULT_PAYLOAD_BYTES) {
       const streamByteSizes = splitBytes(payloadBytes, DOWNLOAD_PARALLEL_STREAMS);
       downloadController = new AbortController();
@@ -285,10 +526,11 @@
       try {
         const streamPromises = streamByteSizes.map(async (streamBytes, streamIndex) => {
           const cacheBust = Date.now() + "-" + Math.floor(Math.random() * 1e6) + "-s" + streamIndex;
-          const testUrl = DEFAULT_ENDPOINT + "?bytes=" + streamBytes + "&cache_bust=" + cacheBust;
+          const testUrl = getDownloadEndpoint() + "?bytes=" + streamBytes + "&cache_bust=" + cacheBust;
           const response = await fetch(testUrl, {
             method: "GET",
             cache: "no-store",
+            mode: "cors",
             signal: downloadController.signal
           });
 
@@ -317,7 +559,7 @@
             const percent = payloadBytes > 0 ? (totalReceived / payloadBytes) * 100 : 0;
 
             speedValue.textContent = fmt(currentMbps, 2);
-            progressText.textContent = "Running " + runIndex + "/" + totalRuns;
+            progressText.textContent = runIndex > 0 ? "Running " + runIndex + "/" + totalRuns : "Warm-up";
             setProgress(percent);
           }
         });
@@ -333,6 +575,10 @@
 
     async function runDownloadTest() {
       if (uploadRunning) return;
+      if (!(await ensureServerSelected())) {
+        setStatus("No test server available. Try refreshing server selection.", true);
+        return;
+      }
       downloadSessionAbort = false;
       setDownloadRunning(true);
       finalMbps = null;
@@ -346,15 +592,15 @@
 
       try {
         const runResults = [];
-        setStatus("Warm-up pass in progress...");
-        progressText.textContent = "Warm-up pass — stabilizing connection...";
+        setStatus("Warm-up pass in progress against " + describeServer(selectedServer) + "...");
+        progressText.textContent = "Warm-up pass - stabilizing connection...";
         setProgress(0);
         await runSingleDownloadPass(0, DOWNLOAD_TEST_RUNS, DOWNLOAD_WARMUP_BYTES);
 
         for (let run = 1; run <= DOWNLOAD_TEST_RUNS; run++) {
           if (downloadSessionAbort) throw new DOMException("Aborted", "AbortError");
           setStatus("Measured download run " + run + " of " + DOWNLOAD_TEST_RUNS + " in progress...");
-          progressText.textContent = "Measured run " + run + " of " + DOWNLOAD_TEST_RUNS + " — connecting...";
+          progressText.textContent = "Measured run " + run + " of " + DOWNLOAD_TEST_RUNS + " - connecting...";
           setProgress(0);
           const mbps = await runSingleDownloadPass(run, DOWNLOAD_TEST_RUNS);
           runResults.push(mbps);
@@ -362,8 +608,8 @@
             if (downloadSessionAbort) throw new DOMException("Aborted", "AbortError");
             progressText.textContent =
               "Measured run " + run + " finished: " + fmt(mbps, 2) + " mbps. Starting run " + (run + 1) + "...";
-            setStatus("Between runs — starting measured download " + (run + 1) + " of " + DOWNLOAD_TEST_RUNS + ".");
-            await new Promise((r) => setTimeout(r, 450));
+            setStatus("Between runs - starting measured download " + (run + 1) + " of " + DOWNLOAD_TEST_RUNS + ".");
+            await wait(450);
           }
         }
 
@@ -403,7 +649,7 @@
       const totalBytes = body.byteLength;
       return new Promise((resolve, reject) => {
         const cacheBust = Date.now() + "-" + Math.floor(Math.random() * 1e6);
-        const testUrl = UPLOAD_ENDPOINT + "?cache_bust=" + cacheBust;
+        const testUrl = getUploadEndpoint() + "?cache_bust=" + cacheBust;
         const xhr = new XMLHttpRequest();
         activeUploadXhrs.push(xhr);
         let previousLoaded = 0;
@@ -428,11 +674,9 @@
         function finishFailure(label) {
           activeUploadXhrs = activeUploadXhrs.filter((item) => item !== xhr);
           const snippet = (xhr.responseText || "").trim().slice(0, 120);
-          const detail =
-            xhr.status > 0
-              ? "HTTP " + xhr.status + (snippet ? ": " + snippet : "")
-              : label + (snippet ? " " + snippet : "");
-          reject(new Error(detail));
+          const message =
+            xhr.status > 0 ? "HTTP " + xhr.status + (snippet ? ": " + snippet : "") : label + (snippet ? " " + snippet : "");
+          reject(new Error(message));
         }
 
         xhr.addEventListener("load", () => {
@@ -472,6 +716,10 @@
 
     async function runUploadTest() {
       if (downloadRunning) return;
+      if (!(await ensureServerSelected())) {
+        setUploadStatus("No test server available. Try refreshing server selection.", true);
+        return;
+      }
       uploadSessionAbort = false;
       setUploadRunning(true);
       finalUploadMbps = null;
@@ -495,7 +743,7 @@
             crypto.getRandomValues(body.subarray(off, off + n));
             if (off > 0 && off % (4 * 1024 * 1024) === 0) {
               uploadProgressText.textContent = "Preparing upload...";
-              await new Promise((r) => setTimeout(r, 0));
+              await wait(0);
             }
           }
         }
@@ -507,7 +755,7 @@
         for (let run = 1; run <= UPLOAD_TEST_RUNS; run++) {
           if (uploadSessionAbort) throw new DOMException("Aborted", "AbortError");
           setUploadStatus("Upload run " + run + " of " + UPLOAD_TEST_RUNS + " in progress...");
-          uploadProgressText.textContent = "Run " + run + " of " + UPLOAD_TEST_RUNS + " — starting...";
+          uploadProgressText.textContent = "Run " + run + " of " + UPLOAD_TEST_RUNS + " - starting...";
           setUploadProgress(0);
           const runStartedAt = performance.now();
           const sharedProgress = { sent: 0, total: totalBytes, startedAt: runStartedAt };
@@ -522,12 +770,12 @@
             if (uploadSessionAbort) throw new DOMException("Aborted", "AbortError");
             uploadProgressText.textContent =
               "Run " + run + " finished: " + fmt(mbps, 2) + " mbps. Starting run " + (run + 1) + "...";
-            setUploadStatus("Between runs — starting upload " + (run + 1) + " of " + UPLOAD_TEST_RUNS + ".");
-            await new Promise((r) => setTimeout(r, 450));
+            setUploadStatus("Between runs - starting upload " + (run + 1) + " of " + UPLOAD_TEST_RUNS + ".");
+            await wait(450);
           }
         }
 
-        finalUploadMbps = runResults.reduce((a, b) => a + b, 0) / runResults.length;
+        finalUploadMbps = average(runResults);
         uploadSpeedValue.textContent = fmt(finalUploadMbps, 2);
         uploadSpeedLabel.textContent = "Average (final)";
         uploadProgressText.textContent =
@@ -582,7 +830,58 @@
       activeUploadXhrs = [];
     });
 
+    serverModeSelect.addEventListener("change", async () => {
+      if (serverModeSelect.value === "manual") {
+        if (!selectedServer && availableServers.length) {
+          setSelectedServer(availableServers[0], "Manual override enabled.");
+        } else if (selectedServer) {
+          setServerDetail("Manual override active on " + describeServer(selectedServer) + ".");
+        }
+        syncServerControls();
+        return;
+      }
+      syncServerControls();
+      try {
+        await autoSelectServer();
+      } catch (error) {
+        setServerDetail("Auto selection failed. Keeping current server.", true);
+      }
+      syncServerControls();
+    });
+
+    serverSelect.addEventListener("change", () => {
+      if (serverModeSelect.value !== "manual") return;
+      const server = availableServers.find((item) => item.id === serverSelect.value);
+      if (!server) return;
+      setSelectedServer(server, "Manual override selected.");
+      syncServerControls();
+    });
+
+    refreshServersBtn.addEventListener("click", async () => {
+      const previousId = selectedServer ? selectedServer.id : null;
+      setServerDetail("Refreshing server measurements...");
+      availableServers = await fetchServerList();
+      renderServerOptions();
+      try {
+        if (serverModeSelect.value === "auto") {
+          await autoSelectServer();
+        } else {
+          const keepServer = availableServers.find((item) => item.id === previousId) || availableServers[0];
+          if (!keepServer) throw new Error("No available server");
+          setSelectedServer(keepServer, "Manual override kept after refresh.");
+          const rtt = await measureServerRtt(keepServer);
+          if (Number.isFinite(rtt)) {
+            setServerDetail("Manual override active on " + describeServer(keepServer) + " (" + fmt(rtt, 1) + " ms RTT).");
+          }
+        }
+      } catch (error) {
+        setServerDetail("Server refresh failed. Please try again.", true);
+      }
+      syncServerControls();
+    });
+
     planSelect.addEventListener("change", evaluateAgainstPlan);
+    initializeServerSelection();
   </script>
 </body>
 </html>
