@@ -121,6 +121,8 @@
     const UPLOAD_ENDPOINT = window.location.origin + "/upload.bin";
     const UPLOAD_CHUNK = 65536;
     const TEST_RUNS = 2;
+    const DOWNLOAD_PARALLEL_STREAMS = 4;
+    const UPLOAD_PARALLEL_STREAMS = 2;
 
     const ring = document.getElementById("ring");
     const speedValue = document.getElementById("speedValue");
@@ -142,7 +144,7 @@
 
     let downloadController = null;
     let downloadSessionAbort = false;
-    let activeUploadXhr = null;
+    let activeUploadXhrs = [];
     let uploadPrepAbort = false;
     let uploadSessionAbort = false;
     let downloadRunning = false;
@@ -152,6 +154,17 @@
 
     function fmt(n, digits = 2) {
       return Number.isFinite(n) ? n.toFixed(digits) : "0.00";
+    }
+
+    function splitBytes(totalBytes, parts) {
+      const safeParts = Math.max(1, Math.floor(parts));
+      const base = Math.floor(totalBytes / safeParts);
+      const remainder = totalBytes % safeParts;
+      const sizes = [];
+      for (let i = 0; i < safeParts; i++) {
+        sizes.push(base + (i < remainder ? 1 : 0));
+      }
+      return sizes;
     }
 
     function setProgress(percent) {
@@ -232,54 +245,55 @@
     }
 
     async function runSingleDownloadPass(runIndex, totalRuns) {
-      const cacheBust = Date.now() + "-" + Math.floor(Math.random() * 1e6);
-      const testUrl = DEFAULT_ENDPOINT + "?bytes=" + DEFAULT_PAYLOAD_BYTES + "&cache_bust=" + cacheBust;
+      const streamByteSizes = splitBytes(DEFAULT_PAYLOAD_BYTES, DOWNLOAD_PARALLEL_STREAMS);
       downloadController = new AbortController();
+      let totalReceived = 0;
+      const startedAt = performance.now();
+
       try {
-        const start = performance.now();
-        const response = await fetch(testUrl, {
-          method: "GET",
-          cache: "no-store",
-          signal: downloadController.signal
+        const streamPromises = streamByteSizes.map(async (streamBytes, streamIndex) => {
+          const cacheBust = Date.now() + "-" + Math.floor(Math.random() * 1e6) + "-s" + streamIndex;
+          const testUrl = DEFAULT_ENDPOINT + "?bytes=" + streamBytes + "&cache_bust=" + cacheBust;
+          const response = await fetch(testUrl, {
+            method: "GET",
+            cache: "no-store",
+            signal: downloadController.signal
+          });
+
+          if (!response.ok || !response.body) {
+            throw new Error("Unable to download test payload.");
+          }
+
+          const contentEncoding = (response.headers.get("content-encoding") || "").toLowerCase();
+          if (contentEncoding && contentEncoding !== "identity") {
+            throw new Error("Compressed payload detected. Disable compression for payload.bin.");
+          }
+
+          const reader = response.body.getReader();
+          while (true) {
+            if (downloadSessionAbort) {
+              downloadController.abort();
+              throw new DOMException("Aborted", "AbortError");
+            }
+            const { done, value } = await reader.read();
+            if (done) break;
+            totalReceived += value.byteLength;
+
+            const elapsedSec = (performance.now() - startedAt) / 1000;
+            const megabits = (totalReceived * 8) / 1_000_000;
+            const currentMbps = elapsedSec > 0 ? megabits / elapsedSec : 0;
+            const percent = DEFAULT_PAYLOAD_BYTES > 0 ? (totalReceived / DEFAULT_PAYLOAD_BYTES) * 100 : 0;
+
+            speedValue.textContent = fmt(currentMbps, 2);
+            progressText.textContent = "Running " + runIndex + "/" + totalRuns;
+            setProgress(percent);
+          }
         });
 
-        if (!response.ok || !response.body) {
-          throw new Error("Unable to download test payload.");
-        }
-
-        const contentEncoding = (response.headers.get("content-encoding") || "").toLowerCase();
-        if (contentEncoding && contentEncoding !== "identity") {
-          throw new Error("Compressed payload detected. Disable compression for payload.bin.");
-        }
-
-        const contentLenHeader = Number(response.headers.get("content-length"));
-        const totalBytes = Number.isFinite(contentLenHeader) && contentLenHeader > 0 ? contentLenHeader : DEFAULT_PAYLOAD_BYTES;
-        const reader = response.body.getReader();
-        let received = 0;
-
-        while (true) {
-          if (downloadSessionAbort) {
-            downloadController.abort();
-            throw new DOMException("Aborted", "AbortError");
-          }
-          const { done, value } = await reader.read();
-          if (done) break;
-          received += value.byteLength;
-
-          const elapsedSec = (performance.now() - start) / 1000;
-          const megabits = (received * 8) / 1_000_000;
-          const currentMbps = elapsedSec > 0 ? megabits / elapsedSec : 0;
-          const percent = totalBytes > 0 ? (received / totalBytes) * 100 : 0;
-
-          speedValue.textContent = fmt(currentMbps, 2);
-          progressText.textContent = "Running " + runIndex + "/" + totalRuns;
-          setProgress(percent);
-        }
-
-        const end = performance.now();
-        const seconds = (end - start) / 1000;
-        const fileMegabits = (received * 8) / 1_000_000;
-        return fileMegabits / seconds;
+        await Promise.all(streamPromises);
+        const elapsedSec = (performance.now() - startedAt) / 1000;
+        const megabits = (totalReceived * 8) / 1_000_000;
+        return elapsedSec > 0 ? megabits / elapsedSec : 0;
       } finally {
         downloadController = null;
       }
@@ -348,31 +362,34 @@
       }
     }
 
-    function executeOneUploadXHR(body, runIndex, totalRuns) {
+    function executeOneUploadXHR(body, runIndex, totalRuns, sharedProgress) {
       const totalBytes = body.byteLength;
       return new Promise((resolve, reject) => {
         const cacheBust = Date.now() + "-" + Math.floor(Math.random() * 1e6);
         const testUrl = UPLOAD_ENDPOINT + "?cache_bust=" + cacheBust;
         const xhr = new XMLHttpRequest();
-        activeUploadXhr = xhr;
-        const start = performance.now();
+        activeUploadXhrs.push(xhr);
+        let previousLoaded = 0;
 
         xhr.timeout = 900000;
 
         xhr.upload.addEventListener("progress", (e) => {
           if (!e.lengthComputable || !e.total) return;
-          const elapsedSec = (performance.now() - start) / 1000;
-          const sent = e.loaded;
-          const megabits = (sent * 8) / 1_000_000;
+          const delta = Math.max(0, e.loaded - previousLoaded);
+          previousLoaded = e.loaded;
+          sharedProgress.sent += delta;
+
+          const elapsedSec = (performance.now() - sharedProgress.startedAt) / 1000;
+          const megabits = (sharedProgress.sent * 8) / 1_000_000;
           const currentMbps = elapsedSec > 0 ? megabits / elapsedSec : 0;
-          const percent = (e.loaded / e.total) * 100;
+          const percent = sharedProgress.total > 0 ? (sharedProgress.sent / sharedProgress.total) * 100 : 0;
           uploadSpeedValue.textContent = fmt(currentMbps, 2);
           uploadProgressText.textContent = "Running " + runIndex + "/" + totalRuns;
           setUploadProgress(percent);
         });
 
         function finishFailure(label) {
-          activeUploadXhr = null;
+          activeUploadXhrs = activeUploadXhrs.filter((item) => item !== xhr);
           const snippet = (xhr.responseText || "").trim().slice(0, 120);
           const detail =
             xhr.status > 0
@@ -382,9 +399,7 @@
         }
 
         xhr.addEventListener("load", () => {
-          activeUploadXhr = null;
-          const end = performance.now();
-          const seconds = (end - start) / 1000;
+          activeUploadXhrs = activeUploadXhrs.filter((item) => item !== xhr);
           if (xhr.status < 200 || xhr.status >= 300) {
             finishFailure("Request failed");
             return;
@@ -396,9 +411,7 @@
           } catch (e2) {
             /* use totalBytes */
           }
-          const fileMegabits = (receivedBytes * 8) / 1_000_000;
-          const mbps = seconds > 0 ? fileMegabits / seconds : 0;
-          resolve({ mbps, seconds });
+          resolve(receivedBytes);
         });
 
         xhr.addEventListener("error", () => {
@@ -406,7 +419,7 @@
         });
 
         xhr.addEventListener("abort", () => {
-          activeUploadXhr = null;
+          activeUploadXhrs = activeUploadXhrs.filter((item) => item !== xhr);
           reject(new DOMException("Aborted", "AbortError"));
         });
 
@@ -426,22 +439,27 @@
       setUploadRunning(true);
       finalUploadMbps = null;
       uploadPrepAbort = false;
+      activeUploadXhrs = [];
       uploadProgressText.textContent = "Preparing upload...";
       uploadSpeedValue.textContent = "0.00";
       setUploadProgress(0);
       setUploadStatus("Building upload payload (in-memory)...");
 
       const totalBytes = UPLOAD_PAYLOAD_BYTES;
-      const body = new Uint8Array(totalBytes);
+      const uploadPartSizes = splitBytes(totalBytes, UPLOAD_PARALLEL_STREAMS);
+      const uploadBodies = uploadPartSizes.map((size) => new Uint8Array(size));
 
       try {
-        for (let off = 0; off < totalBytes; off += UPLOAD_CHUNK) {
-          if (uploadPrepAbort || uploadSessionAbort) throw new DOMException("Aborted", "AbortError");
-          const n = Math.min(UPLOAD_CHUNK, totalBytes - off);
-          crypto.getRandomValues(body.subarray(off, off + n));
-          if (off > 0 && off % (4 * 1024 * 1024) === 0) {
-            uploadProgressText.textContent = "Preparing upload...";
-            await new Promise((r) => setTimeout(r, 0));
+        for (let bodyIndex = 0; bodyIndex < uploadBodies.length; bodyIndex++) {
+          const body = uploadBodies[bodyIndex];
+          for (let off = 0; off < body.byteLength; off += UPLOAD_CHUNK) {
+            if (uploadPrepAbort || uploadSessionAbort) throw new DOMException("Aborted", "AbortError");
+            const n = Math.min(UPLOAD_CHUNK, body.byteLength - off);
+            crypto.getRandomValues(body.subarray(off, off + n));
+            if (off > 0 && off % (4 * 1024 * 1024) === 0) {
+              uploadProgressText.textContent = "Preparing upload...";
+              await new Promise((r) => setTimeout(r, 0));
+            }
           }
         }
 
@@ -454,12 +472,19 @@
           setUploadStatus("Upload run " + run + " of " + TEST_RUNS + " in progress...");
           uploadProgressText.textContent = "Run " + run + " of " + TEST_RUNS + " — starting...";
           setUploadProgress(0);
-          const result = await executeOneUploadXHR(body, run, TEST_RUNS);
-          runResults.push(result.mbps);
+          const runStartedAt = performance.now();
+          const sharedProgress = { sent: 0, total: totalBytes, startedAt: runStartedAt };
+          const streamResults = await Promise.all(
+            uploadBodies.map((body) => executeOneUploadXHR(body, run, TEST_RUNS, sharedProgress))
+          );
+          const elapsedSec = (performance.now() - runStartedAt) / 1000;
+          const totalReceivedBytes = streamResults.reduce((sum, value) => sum + value, 0);
+          const mbps = elapsedSec > 0 ? (totalReceivedBytes * 8) / 1_000_000 / elapsedSec : 0;
+          runResults.push(mbps);
           if (run < TEST_RUNS) {
             if (uploadSessionAbort) throw new DOMException("Aborted", "AbortError");
             uploadProgressText.textContent =
-              "Run " + run + " finished: " + fmt(result.mbps, 2) + " mbps. Starting run " + (run + 1) + "...";
+              "Run " + run + " finished: " + fmt(mbps, 2) + " mbps. Starting run " + (run + 1) + "...";
             setUploadStatus("Between runs — starting upload " + (run + 1) + " of " + TEST_RUNS + ".");
             await new Promise((r) => setTimeout(r, 450));
           }
@@ -496,7 +521,7 @@
         setUploadProgress(0);
       } finally {
         setUploadRunning(false);
-        activeUploadXhr = null;
+        activeUploadXhrs = [];
       }
     }
 
@@ -516,7 +541,8 @@
     uploadCancelBtn.addEventListener("click", () => {
       uploadSessionAbort = true;
       uploadPrepAbort = true;
-      if (activeUploadXhr) activeUploadXhr.abort();
+      activeUploadXhrs.forEach((xhr) => xhr.abort());
+      activeUploadXhrs = [];
     });
 
     planSelect.addEventListener("change", evaluateAgainstPlan);
