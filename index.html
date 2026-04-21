@@ -272,16 +272,7 @@
           const percent = totalBytes > 0 ? (received / totalBytes) * 100 : 0;
 
           speedValue.textContent = fmt(currentMbps, 2);
-          progressText.textContent =
-            "Run " +
-            runIndex +
-            "/" +
-            totalRuns +
-            " — " +
-            (received / 1_048_576).toFixed(2) +
-            " / " +
-            (totalBytes / 1_048_576).toFixed(2) +
-            " MB";
+          progressText.textContent = "Running " + runIndex + "/" + totalRuns;
           setProgress(percent);
         }
 
@@ -376,16 +367,7 @@
           const currentMbps = elapsedSec > 0 ? megabits / elapsedSec : 0;
           const percent = (e.loaded / e.total) * 100;
           uploadSpeedValue.textContent = fmt(currentMbps, 2);
-          uploadProgressText.textContent =
-            "Run " +
-            runIndex +
-            "/" +
-            totalRuns +
-            " — " +
-            (e.loaded / 1_048_576).toFixed(2) +
-            " / " +
-            (e.total / 1_048_576).toFixed(2) +
-            " MB";
+          uploadProgressText.textContent = "Running " + runIndex + "/" + totalRuns;
           setUploadProgress(percent);
         });
 
@@ -458,8 +440,7 @@
           const n = Math.min(UPLOAD_CHUNK, totalBytes - off);
           crypto.getRandomValues(body.subarray(off, off + n));
           if (off > 0 && off % (4 * 1024 * 1024) === 0) {
-            uploadProgressText.textContent =
-              "Preparing " + (Math.min(off + n, totalBytes) / 1_048_576).toFixed(2) + " MB...";
+            uploadProgressText.textContent = "Preparing upload...";
             await new Promise((r) => setTimeout(r, 0));
           }
         }
