@@ -62,20 +62,20 @@
       <div class="tests-grid">
       <section class="panel">
         <p class="label" style="margin:0 0 4px;font-weight:700;color:var(--deep)">Download</p>
-        <p class="two-runs-notice">This test runs <strong>twice</strong> in a row. The final number is the <strong>average</strong> of both runs. You need to finish both passes before the result is final.</p>
+        <p class="two-runs-notice" id="downloadRunsNotice">This test runs multiple passes and discards warm-up noise for a steadier final result.</p>
         <div class="ring" id="ring" aria-hidden="true">
           <div class="inner">
             <p class="label" id="speedLabel">Current Speed</p>
             <p class="speed" id="speedValue">0.00</p>
             <p class="units">mbps</p>
-            <p class="progress" id="progressText">Ready — 2 runs, then average</p>
+        <p class="progress" id="progressText">Ready — warm-up + measured runs, then trimmed average</p>
           </div>
         </div>
         <div class="actions">
           <button class="start" id="startBtn">Start Download</button>
           <button class="cancel" id="cancelBtn" disabled>Cancel</button>
         </div>
-        <p class="status" id="status">Runs twice; the final mbps is the average. Press Start Download.</p>
+        <p class="status" id="status">Uses a warm-up plus measured runs; the final mbps is a trimmed average. Press Start Download.</p>
       </section>
       <section class="panel panel-upload">
         <p class="label" style="margin:0 0 4px;font-weight:700;color:var(--purple-deep)">Upload</p>
@@ -115,12 +115,14 @@
     </section>
   </main>
   <script>
-    const DEFAULT_PAYLOAD_BYTES = 134217728;
+    const DEFAULT_PAYLOAD_BYTES = 268435456;
+    const DOWNLOAD_WARMUP_BYTES = 67108864;
     const UPLOAD_PAYLOAD_BYTES = 32 * 1024 * 1024;
     const DEFAULT_ENDPOINT = window.location.origin + "/payload.bin";
     const UPLOAD_ENDPOINT = window.location.origin + "/upload.bin";
     const UPLOAD_CHUNK = 65536;
-    const TEST_RUNS = 2;
+    const DOWNLOAD_TEST_RUNS = 4;
+    const UPLOAD_TEST_RUNS = 2;
     const DOWNLOAD_PARALLEL_STREAMS = 4;
     const UPLOAD_PARALLEL_STREAMS = 2;
 
@@ -138,7 +140,27 @@
     const uploadStatusEl = document.getElementById("uploadStatus");
     const uploadStartBtn = document.getElementById("uploadStartBtn");
     const uploadCancelBtn = document.getElementById("uploadCancelBtn");
+    const downloadRunsNotice = document.getElementById("downloadRunsNotice");
     const planSelect = document.getElementById("planSelect");
+    downloadRunsNotice.innerHTML =
+      "This test runs <strong>1 warm-up</strong> plus <strong>" +
+      DOWNLOAD_TEST_RUNS +
+      " measured runs</strong>. The final number is a <strong>trimmed average</strong> to reduce volatility.";
+
+    function average(values) {
+      if (!values.length) return 0;
+      return values.reduce((sum, value) => sum + value, 0) / values.length;
+    }
+
+    function computeStableMbps(runResults) {
+      if (!runResults.length) return 0;
+      if (runResults.length >= 3) {
+        const sorted = [...runResults].sort((a, b) => a - b);
+        return average(sorted.slice(1, -1));
+      }
+      return average(runResults);
+    }
+
     const evaluation = document.getElementById("evaluation");
     const detail = document.getElementById("detail");
 
@@ -210,8 +232,18 @@
     function refreshDetailTip() {
       const tip = "Tip: reboot modem/router, test over ethernet, and retest at a low-traffic time.";
       const parts = [];
-      if (finalMbps != null) parts.push("Download (avg of " + TEST_RUNS + "): " + fmt(finalMbps, 2) + " mbps");
-      if (finalUploadMbps != null) parts.push("Upload (avg of " + TEST_RUNS + "): " + fmt(finalUploadMbps, 2) + " mbps");
+      if (finalMbps != null) {
+        parts.push(
+          "Download (trimmed avg of " +
+            DOWNLOAD_TEST_RUNS +
+            " measured runs): " +
+            fmt(finalMbps, 2) +
+            " mbps"
+        );
+      }
+      if (finalUploadMbps != null) {
+        parts.push("Upload (avg of " + UPLOAD_TEST_RUNS + "): " + fmt(finalUploadMbps, 2) + " mbps");
+      }
       if (parts.length) detail.textContent = parts.join(" · ") + ". " + tip;
     }
 
@@ -244,8 +276,8 @@
       refreshDetailTip();
     }
 
-    async function runSingleDownloadPass(runIndex, totalRuns) {
-      const streamByteSizes = splitBytes(DEFAULT_PAYLOAD_BYTES, DOWNLOAD_PARALLEL_STREAMS);
+    async function runSingleDownloadPass(runIndex, totalRuns, payloadBytes = DEFAULT_PAYLOAD_BYTES) {
+      const streamByteSizes = splitBytes(payloadBytes, DOWNLOAD_PARALLEL_STREAMS);
       downloadController = new AbortController();
       let totalReceived = 0;
       const startedAt = performance.now();
@@ -282,7 +314,7 @@
             const elapsedSec = (performance.now() - startedAt) / 1000;
             const megabits = (totalReceived * 8) / 1_000_000;
             const currentMbps = elapsedSec > 0 ? megabits / elapsedSec : 0;
-            const percent = DEFAULT_PAYLOAD_BYTES > 0 ? (totalReceived / DEFAULT_PAYLOAD_BYTES) * 100 : 0;
+            const percent = payloadBytes > 0 ? (totalReceived / payloadBytes) * 100 : 0;
 
             speedValue.textContent = fmt(currentMbps, 2);
             progressText.textContent = "Running " + runIndex + "/" + totalRuns;
@@ -310,39 +342,44 @@
       progressText.textContent = "Starting downloads...";
       speedValue.textContent = "0.00";
       setProgress(0);
-      setStatus("Running " + TEST_RUNS + " download passes...");
+      setStatus("Running warm-up plus " + DOWNLOAD_TEST_RUNS + " measured download passes...");
 
       try {
         const runResults = [];
-        for (let run = 1; run <= TEST_RUNS; run++) {
+        setStatus("Warm-up pass in progress...");
+        progressText.textContent = "Warm-up pass — stabilizing connection...";
+        setProgress(0);
+        await runSingleDownloadPass(0, DOWNLOAD_TEST_RUNS, DOWNLOAD_WARMUP_BYTES);
+
+        for (let run = 1; run <= DOWNLOAD_TEST_RUNS; run++) {
           if (downloadSessionAbort) throw new DOMException("Aborted", "AbortError");
-          setStatus("Download run " + run + " of " + TEST_RUNS + " in progress...");
-          progressText.textContent = "Run " + run + " of " + TEST_RUNS + " — connecting...";
+          setStatus("Measured download run " + run + " of " + DOWNLOAD_TEST_RUNS + " in progress...");
+          progressText.textContent = "Measured run " + run + " of " + DOWNLOAD_TEST_RUNS + " — connecting...";
           setProgress(0);
-          const mbps = await runSingleDownloadPass(run, TEST_RUNS);
+          const mbps = await runSingleDownloadPass(run, DOWNLOAD_TEST_RUNS);
           runResults.push(mbps);
-          if (run < TEST_RUNS) {
+          if (run < DOWNLOAD_TEST_RUNS) {
             if (downloadSessionAbort) throw new DOMException("Aborted", "AbortError");
             progressText.textContent =
-              "Run " + run + " finished: " + fmt(mbps, 2) + " mbps. Starting run " + (run + 1) + "...";
-            setStatus("Between runs — starting download " + (run + 1) + " of " + TEST_RUNS + ".");
+              "Measured run " + run + " finished: " + fmt(mbps, 2) + " mbps. Starting run " + (run + 1) + "...";
+            setStatus("Between runs — starting measured download " + (run + 1) + " of " + DOWNLOAD_TEST_RUNS + ".");
             await new Promise((r) => setTimeout(r, 450));
           }
         }
 
-        finalMbps = runResults.reduce((a, b) => a + b, 0) / runResults.length;
+        finalMbps = computeStableMbps(runResults);
         speedValue.textContent = fmt(finalMbps, 2);
-        speedLabel.textContent = "Average (final)";
+        speedLabel.textContent = "Trimmed Avg (final)";
         progressText.textContent =
-          "Average of " +
-          TEST_RUNS +
-          " runs: " +
+          "Trimmed average of " +
+          DOWNLOAD_TEST_RUNS +
+          " measured runs: " +
           fmt(finalMbps, 2) +
           " mbps (" +
           runResults.map((x) => fmt(x, 2)).join(" & ") +
           " mbps)";
         setProgress(100);
-        setStatus("Download complete. Pick your plan to compare.");
+        setStatus("Download complete with volatility smoothing. Pick your plan to compare.");
         planSelect.disabled = false;
         refreshDetailTip();
       } catch (err) {
@@ -465,27 +502,27 @@
 
         if (uploadPrepAbort || uploadSessionAbort) throw new DOMException("Aborted", "AbortError");
 
-        setUploadStatus("Running " + TEST_RUNS + " upload passes...");
+        setUploadStatus("Running " + UPLOAD_TEST_RUNS + " upload passes...");
         const runResults = [];
-        for (let run = 1; run <= TEST_RUNS; run++) {
+        for (let run = 1; run <= UPLOAD_TEST_RUNS; run++) {
           if (uploadSessionAbort) throw new DOMException("Aborted", "AbortError");
-          setUploadStatus("Upload run " + run + " of " + TEST_RUNS + " in progress...");
-          uploadProgressText.textContent = "Run " + run + " of " + TEST_RUNS + " — starting...";
+          setUploadStatus("Upload run " + run + " of " + UPLOAD_TEST_RUNS + " in progress...");
+          uploadProgressText.textContent = "Run " + run + " of " + UPLOAD_TEST_RUNS + " — starting...";
           setUploadProgress(0);
           const runStartedAt = performance.now();
           const sharedProgress = { sent: 0, total: totalBytes, startedAt: runStartedAt };
           const streamResults = await Promise.all(
-            uploadBodies.map((body) => executeOneUploadXHR(body, run, TEST_RUNS, sharedProgress))
+            uploadBodies.map((body) => executeOneUploadXHR(body, run, UPLOAD_TEST_RUNS, sharedProgress))
           );
           const elapsedSec = (performance.now() - runStartedAt) / 1000;
           const totalReceivedBytes = streamResults.reduce((sum, value) => sum + value, 0);
           const mbps = elapsedSec > 0 ? (totalReceivedBytes * 8) / 1_000_000 / elapsedSec : 0;
           runResults.push(mbps);
-          if (run < TEST_RUNS) {
+          if (run < UPLOAD_TEST_RUNS) {
             if (uploadSessionAbort) throw new DOMException("Aborted", "AbortError");
             uploadProgressText.textContent =
               "Run " + run + " finished: " + fmt(mbps, 2) + " mbps. Starting run " + (run + 1) + "...";
-            setUploadStatus("Between runs — starting upload " + (run + 1) + " of " + TEST_RUNS + ".");
+            setUploadStatus("Between runs — starting upload " + (run + 1) + " of " + UPLOAD_TEST_RUNS + ".");
             await new Promise((r) => setTimeout(r, 450));
           }
         }
@@ -495,7 +532,7 @@
         uploadSpeedLabel.textContent = "Average (final)";
         uploadProgressText.textContent =
           "Average of " +
-          TEST_RUNS +
+          UPLOAD_TEST_RUNS +
           " runs: " +
           fmt(finalUploadMbps, 2) +
           " mbps (" +
